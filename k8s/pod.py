@@ -3,7 +3,9 @@
 
 import unittest
 from k8s_utils import run
-from k8s_utils import ensure_pod_phase, ensure_namespace_phase
+from k8s_utils import ensure_pod_phase
+from k8s_utils import ensure_namespace_phase
+from k8s_utils import get_pod_phase
 import time
 import subprocess
 
@@ -39,6 +41,16 @@ class UnitTest(unittest.TestCase):
         # It’s a good idea to use this format for annotation keys to prevent key collisions.
         run('kubectl annotate pod kubia-manual mycompany.com/someannotation="foo bar"')
         run('kubectl describe pod kubia-manual | grep Annotations')
+
+    def test_liveness_probe(self):
+        if get_pod_phase('kubia-liveness') != 'Running':
+            run('kubectl delete po kubia-liveness', True)
+            ensure_pod_phase('kubia-liveness', 'Deleted')
+            run('kubectl create -f kubia-liveness-probe.yaml', True)
+            ensure_pod_phase('kubia-liveness')
+
+
+
 
     def test_namespace(self):
         run('kubectl get po -n kube-system')

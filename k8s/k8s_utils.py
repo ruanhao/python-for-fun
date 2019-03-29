@@ -6,6 +6,15 @@ import subprocess
 import time
 import json
 
+
+def get_pod_phase(name):
+    stdout = run(f'kubectl get pods {name} -o json', True)
+    if not stdout:
+        return
+    stdout_json = json.loads(stdout)
+    return stdout_json['status']['phase']
+
+
 def ensure_namespace_phase(name, expected_phase='Active', tries=1):
     if tries > 60:
         raise Exception(f"Exceed max tries to ensure namespace {name}'s status ({expected_phase})")
@@ -30,6 +39,7 @@ def ensure_pod_phase(name, expected_phase='Running', tries=1):
         return
     time.sleep(3)
     ensure_pod_phase(name, expected_phase, tries+1)
+
 
 def run(script, quiet=False):
     if quiet is False:
