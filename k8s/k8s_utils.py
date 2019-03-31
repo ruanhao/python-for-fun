@@ -14,6 +14,24 @@ def get_pod_phase(name):
     stdout_json = json.loads(stdout)
     return stdout_json['status']['phase']
 
+def is_rc_ready(name):
+    stdout = run(f'kubectl get rc {name} -o json', True)
+    if not stdout:
+        return False
+    status = json.loads(stdout).get('status')
+    ready = status.get('readyReplicas')
+    if not ready:
+        return False
+    return status['replicas'] == ready
+
+
+def ensure_rc_ready(name, tries=1):
+    if tries > 60:
+        raise Exception(f"Exceed max tries to ensure rc {name} ready")
+    if is_rc_ready(name):
+        return
+    time.sleep(3)
+    ensure_rc_ready(name, tries+1)
 
 def ensure_namespace_phase(name, expected_phase='Active', tries=1):
     if tries > 60:
