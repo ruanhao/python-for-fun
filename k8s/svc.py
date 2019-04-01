@@ -6,6 +6,8 @@ from k8s_utils import run
 from k8s_utils import is_rc_ready
 from k8s_utils import ensure_rc_ready
 from k8s_utils import ensure_pod_phase
+from k8s_utils import get_ingress_address
+from k8s_utils import get_pod_phase
 import json
 import yaml                     # pip3 install pyyaml
 
@@ -22,7 +24,7 @@ class UnitTest(unittest.TestCase):
         run('kubectl get svc kubia')
         pod_name = run("kubectl get pods -l app=kubia -ojsonpath='{.items[0].metadata.name}'", True)
         ensure_pod_phase(pod_name)
-        clusterIp = run("kubectl get svc kubia -o=jsonpath='{.spec.clusterIP}'", True)
+        clusterIp = run("kubectl get svc kubia -ojsonpath='{.spec.clusterIP}'", True)
         run(f"kubectl exec {pod_name} -- curl -s http://{clusterIp}")
         pods = set()
         for i in range(10):
@@ -105,16 +107,52 @@ class UnitTest(unittest.TestCase):
         run(f'kubectl exec {pod_name} -- curl -s -H "Host: www.baidu.com" external-service-external-name')
 
 
-    def test_exposing_services_to_external_clients(self):
-        with self.subTest("Using a NodePort service"):
-            run('kubectl delete svc kubia-nodeport', True)
+    def test_exposing_services_to_external_clients_by_nodeport(self):
+        run('kubectl delete svc kubia-nodeport', True)
 
-            run('kubectl create -f kubia-svc-nodeport.yaml')
-            run('kubectl get svc kubia-nodeport')
-            node_port_service = run('minikube service kubia-nodeport --url', True)
-            run(f'curl -s {node_port_service}')
+        run('kubectl create -f kubia-svc-nodeport.yaml')
+        run('kubectl get svc kubia-nodeport')
+        node_port_service = run('minikube service kubia-nodeport --url', True)
+        run(f'curl -s {node_port_service}')
 
-        with self.subTest('Exposing a service through an external load balancer'):
-            run('kubectl delete svc kubia-loadbalancer', True)
-            run('kubectl create -f kubia-svc-loadbalancer.yaml')
-            run('kubectl get svc kubia-loadbalancer')
+    def test_exposing_services_to_external_clients_by_loadbalancer(self):
+        run('kubectl delete svc kubia-loadbalancer', True)
+        run('kubectl create -f kubia-svc-loadbalancer.yaml')
+        run('kubectl get svc kubia-loadbalancer')
+
+
+    def test_exposing_services_to_external_clients_by_ingress(self):
+        run('kubectl delete svc kubia-nodeport', True)
+        run('kubectl create -f kubia-svc-nodeport.yaml', True)
+        run('kubectl delete ing kubia', True)
+
+        run('kubectl create -f kubia-ingress.yaml')
+        run('kubectl get ing kubia')
+        # When running on cloud providers, the address may take time to appear,
+        # because the Ingress controller provisions a load balancer behind the scenes.
+        ing_ip = get_ingress_address('kubia')
+        pod_name = run("kubectl get pods -l app=kubia -ojsonpath='{.items[0].metadata.name}'", True)
+        ensure_pod_phase(pod_name)
+        run(f'kubectl exec {pod_name} -- curl -s {ing_ip}')
+        run(f'kubectl exec {pod_name} -- curl -s -H "Host: kubia.example.com" {ing_ip}')
+
+        with self.subTest("Configuring Ingress to handle TLS traffic"):
+            run('kubectl delete secret tls tls-secret', True)
+            # prepare cert first
+            run('openssl genrsa -out tls.key 2048', True)
+            run('openssl req -new -x509 -key tls.key -out tls.cert -days 360 -subj /CN=kubia.example.com', True)
+            run('kubectl create secret tls tls-secret --cert=tls.cert --key=tls.key')
+
+            run('kubectl apply -f kubia-ingress-tls.yaml')
+            run(f'kubectl exec {pod_name} -- curl -k -s -H "Host: kubia.example.com" https://{ing_ip}')
+
+
+    def test_headless_svc(self):
+        run('kubectl delete svc kubia-headless', True)
+        if get_pod_phase('dnsutils') is None:
+            run('kubectl run dnsutils --image=tutum/dnsutils --generator=run-pod/v1 --command -- sleep infinity', True)
+        ensure_pod_phase('dnsutils')
+
+        run('kubectl create -f kubia-svc-headless.yaml')
+        run('kubectl exec dnsutils nslookup kubia-headless')
+        run('kubectl get ep kubia-headless')

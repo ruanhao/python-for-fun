@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from k8s_utils import run
+from k8s_utils import ensure_pod_phase
 import unittest
 import time
 
@@ -10,9 +11,15 @@ class UnitTest(unittest.TestCase):
     def setUp(self):
         run('kubectl delete rc kubia', quiet=True)
         run('kubectl delete svc kubia-http', quiet=True)
+        run('kubectl delete pod dnsutils', quiet=True)
+        ensure_pod_phase('dnsutils', 'Deleted')
 
 
-    def test_simple_run(self):
+    def test_simple_run_pod(self):
+        run('kubectl run dnsutils --image=tutum/dnsutils --generator=run-pod/v1 --command -- sleep infinity')
+
+
+    def test_simple_run_rc(self):
         # --port=8080 option tells Kubernetes that your app is listening on port 8080
         # --generator option tells Kubernetes to create a ReplicationController instead of a Deployment
         run('kubectl run kubia --image=luksa/kubia --port=8080 --generator=run/v1')

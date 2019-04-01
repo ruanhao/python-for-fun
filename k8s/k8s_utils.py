@@ -74,3 +74,14 @@ def run(script, quiet=False):
         if proc.returncode:
             raise Exception('Exit Code: %s' % proc.returncode)
     return stdout_str
+
+
+def get_ingress_address(name, tries=1):
+    while True:
+        if tries > 60:
+            raise Exception(f"Exceed max tries to get ing {name}'s IP")
+        ip_addr = run(f"kubectl get ing {name} -o jsonpath='{{.status.loadBalancer.ingress[0].ip}}'", True)
+        if ip_addr:
+            return ip_addr
+        time.sleep(3)
+        tries += 1
