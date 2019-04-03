@@ -31,7 +31,6 @@ class UnitTest(unittest.TestCase):
         ensure_pod_phase('mongodb', 'Running')
 
         now = str(datetime.datetime.now())
-
         run(f"""kubectl exec mongodb -- mongo --quiet localhost/mystore --eval 'db.foo.insert({{time: "{now}"}})'""")
 
         run('kubectl delete pod mongodb', True)
@@ -63,3 +62,36 @@ class UnitTest(unittest.TestCase):
         ensure_pod_phase('mongodb', 'Running')
 
         run("""kubectl exec mongodb -- mongo localhost/mystore --quiet --eval 'db.foo.find({})'""")
+
+
+    def test_dp_pv_vol(self):
+        '''
+        Dynamical Provision
+        '''
+        run('kubectl delete pod mongodb', True)
+        ensure_pod_phase('mongodb', 'Deleted')
+        run('kubectl delete pvc mongodb-pvc', True)
+        run('kubectl delete sc fast', True)
+
+        # 1, Define StroageClass
+        run('kubectl create -f storageclass-fast-hostpath.yaml')
+        run('kubectl get sc')
+
+        # 2, Requesting the storage class in a PersistentVolumeClaim
+        run('kubectl create -f mongodb-pvc-dp.yaml')
+        run('kubectl get pvc mongodb-pvc')
+        run('kubectl get pv')  # Its reclaim policy is Delete, which means the PersistentVolume will be deleted when the PVC is deleted.
+
+        # 3, Create pod using pvc
+        run('kubectl create -f mongodb-pod-pvc.yaml')
+        ensure_pod_phase('mongodb', 'Running')
+
+        # 4, Verify
+        now = str(datetime.datetime.now())
+        run(f"""kubectl exec mongodb -- mongo --quiet localhost/mystore --eval 'db.foo.insert({{time: "{now}"}})'""")
+        run('kubectl delete pod mongodb')
+        ensure_pod_phase('mongodb', 'Deleted')
+        run('kubectl create -f mongodb-pod-pvc.yaml')
+        ensure_pod_phase('mongodb', 'Running')
+        ret = run("""kubectl exec mongodb -- mongo localhost/mystore --quiet --eval 'db.foo.find({}, {_id: 0}).sort({time: -1}).limit(1)'""")
+        self.assertEqual(now, json.loads(ret)['time'])
