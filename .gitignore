@@ -107,3 +107,6 @@ venv.bak/
 
 tls.cert
 tls.key
+https.cert
+https.key
+foo
