@@ -6,34 +6,15 @@
 # kubectl expose deployment hello-minikube --type=NodePort
 
 import unittest
-import kubernetes
-from kubernetes import client, config, watch
-from pprint import pprint
 import yaml
+import time
+import subprocess
+import os
+from contextlib import redirect_stdout
+from contextlib import redirect_stderr
+from k8s_utils import run
 
 
-
-_config = config.load_kube_config()
-api_instance = client.AppsV1Api(client.ApiClient(_config))
-
-DEPLOYMENT_NAME = "nginx-deployment"
-
-
-def run_script(script, echo=True):
-  """Returns (stdout, stderr), raises error on non-zero return code"""
-  import subprocess
-  # Note: by using a list here (['bash', ...]) you avoid quoting issues, as the
-  # arguments are passed in exactly this order (spaces, quotes, and newlines won't
-  # cause problems):
-  proc = subprocess.Popen(['bash', '-c', script],
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          stdin=subprocess.PIPE)
-  stdout, stderr = proc.communicate()
-  if proc.returncode:
-    raise Exception('exit code %s (%s)' % (proc.returncode, stderr))
-  if echo is True:
-    print(f"====== {script} ======")
-    print(stdout.decode('utf-8'))
 
 def _remove_none(obj):
   if isinstance(obj, (list, tuple, set)):
@@ -52,63 +33,84 @@ def _print_yaml(obj):
 
 class UnitTest(unittest.TestCase):
 
-    def tearDown(self):
-      run_script('kubectl delete deploy nginx-deployment', False)
+    def test_create(self):
+        '''v1'''
+        run('kubectl delete deploy kubia', True)
+        run('kubectl delete svc kubia-nodeport', True)
 
-    def test_create_deploy(self):
-      print()
-
-      # Create container
-      container = client.V1Container(
-        name="nginx",
-        image="nginx:1.7.9",
-        ports=[client.V1ContainerPort(container_port=80)])
-
-      # Create and configurate a spec section
-      template = client.V1PodTemplateSpec(
-        metadata=client.V1ObjectMeta(labels={"app": "nginx"}),
-        spec=client.V1PodSpec(containers=[container]))
-
-      # Create the specification of deployment
-      spec = client.ExtensionsV1beta1DeploymentSpec(replicas=3, template=template)
-
-      # Instantiate the deployment object
-      deployment = client.ExtensionsV1beta1Deployment(
-        api_version="extensions/v1beta1",
-        kind="Deployment",
-        metadata=client.V1ObjectMeta(name=DEPLOYMENT_NAME),
-        spec=spec)
-
-      client.ExtensionsV1beta1Api().create_namespaced_deployment(body=deployment, namespace='default')
-      _print_yaml(deployment)
-      run_script('kubectl get deploy')
-      run_script('kubectl get rs')
-      run_script('kubectl get pods --show-labels')
+        run('kubectl create -f kubia-deployment-v1.yaml --record')
+        run('kubectl get deploy')
+        run('kubectl rollout status deployment kubia')  # used specifically for checking a Deployment's status
+        run('kubectl get rs')
+        run('kubectl get po')
+        run('kubectl create -f kubia-svc-nodeport.yaml')
 
 
-    def test_update_deploy(self):
-      self.test_create_deploy()
+    def test_update(self):
+        '''v1 => v2'''
+        with open(os.devnull, 'w') as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                self.test_create()
+        # slow down the update process a little,
+        # so you can see that the update is indeed performed in a rolling fashion.
+        run("""kubectl patch deployment kubia -p '{"spec": {"minReadySeconds": 10}}'""", True)
+        url = run('minikube service kubia-nodeport --url', True)
+        p = subprocess.Popen(f'rm -rf /tmp/update.log && while true; do echo "`date +%T` - `curl -s {url}`" >> /tmp/update.log; sleep 1 ; done', shell=True)
 
-      # 默认情况下，带有参数 --record 的命令都会被 kubernetes 记录到 etcd 进行持久化
-      # 这会占用资源，上生产环境时，通过设置 Deployment.spec.revisionHistoryLimit 来限制最大保留的 revision number
-      run_script('kubectl set image deployment/nginx-deployment nginx=nginx:1.9.1 --record')  # also: kubectl edit deployment/nginx-deployment
-      run_script('kubectl rollout status deployment/nginx-deployment')
+        run('kubectl set image deployment kubia nodejs=luksa/kubia:v2 --record')
+        run('kubectl rollout status deployment kubia')
+        run('echo "=== rollout successfully ===" >> /tmp/update.log', True)
+        time.sleep(5)           # check all requests should hit v2
+        p.terminate()
+        p.wait()
+        run("cat /tmp/update.log")
+        run('kubectl get rs')   # old ReplicaSet is still there
 
-      # 通过创建一个新的 Replica Set 并扩容了 3 个 replica ，同时将原来的 Replica Set 缩容到了 0 个 replica
-      run_script('kubectl get rs')
+    def test_rolling_back(self):
+        '''
+        v2 => v3
+        In version 3, you'll introduce a bug that makes your app handle only the first four requests properly.
+        All requests from the fifth request onward will return an internal server error (HTTP status code 500).
+        '''
+        with open(os.devnull, 'w') as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                self.test_update()  # ensure current version is v2
 
-      run_script('kubectl set image deployment/nginx-deployment nginx=nginx:1.10.3 --record')
-      run_script('kubectl rollout status deployment/nginx-deployment')
-      # 返回 Deployment 的所有 record 记录
-      run_script('kubectl rollout history deployment/nginx-deployment')
-      # 回滚
-      run_script('kubectl rollout undo deployment/nginx-deployment --to-revision=2')
-      run_script('kubectl describe deploy nginx-deployment')
+        url = run('minikube service kubia-nodeport --url', True)
+        p = subprocess.Popen(f'rm -rf /tmp/rollback.log && while true; do echo "`date +%T` - `curl -s {url}`" >> /tmp/rollback.log; sleep 1 ; done',
+                             shell=True)
+        run('kubectl set image deployment kubia nodejs=luksa/kubia:v3 --record')
+        run('kubectl rollout status deployment kubia')
+        run('echo "=== rollout to v3 successfully ===" >> /tmp/rollback.log', True)
+        time.sleep(5)           # wait for error log of the app
+        run('kubectl rollout history deployment kubia')  # revision history
+        run('kubectl rollout undo deployment kubia')  # roll back
+        run('kubectl rollout status deployment kubia')
+        run('echo "=== roll back to v2 successfully ===" >> /tmp/rollback.log', True)
+        time.sleep(3)
+        p.terminate()
+        p.wait()
+        run("cat /tmp/rollback.log")
+        run('kubectl rollout history deployment kubia')  # revision history
+        #  if you want to roll back to the first version, you'd execute the following command:
+        #  $ kubectl rollout undo deployment kubia --to-revision=1
 
 
+    def test_pausing_rolling_out(self):
+        '''
+        v1 => v4 => v2
+        '''
+        with open(os.devnull, 'w') as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                self.test_create()  # v1
 
-
-
-
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
+        # set version to v4
+        run('kubectl set image deployment kubia nodejs=luksa/kubia:v4 --record')
+        run("kubectl get deploy/kubia -o jsonpath='{.spec.template.spec.containers[0].image}'")
+        run('kubectl rollout pause deployment kubia')
+        # modify version to v2
+        run('kubectl set image deployment kubia nodejs=luksa/kubia:v2 --record')
+        run('kubectl rollout resume deployment kubia')
+        run('kubectl rollout status deployment kubia')
+        run('kubectl rollout history deployment kubia')  # revision history
+        run("kubectl get deploy/kubia -o jsonpath='{.spec.template.spec.containers[0].image}'")
