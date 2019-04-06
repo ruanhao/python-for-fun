@@ -19,6 +19,10 @@ class UnitTest(unittest.TestCase):
         run('kubectl run dnsutils --image=tutum/dnsutils --generator=run-pod/v1 --command -- sleep infinity')
 
 
+    def test_run_temporary_pod(self):
+        run('kubectl run -it srvlookup --image=tutum/dnsutils --rm --restart=Never -- dig www.baidu.com')
+
+
     def test_simple_run_rc(self):
         # --port=8080 option tells Kubernetes that your app is listening on port 8080
         # --generator option tells Kubernetes to create a ReplicationController instead of a Deployment
