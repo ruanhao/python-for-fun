@@ -46,10 +46,10 @@ def ensure_namespace_phase(name, expected_phase='Active', tries=1):
     ensure_namespace_phase(name, expected_phase, tries+1)
 
 
-def ensure_pod_phase(name, expected_phase='Running', tries=1):
+def ensure_pod_phase(name, expected_phase='Running', ns='default', tries=1):
     if tries > 60:
         raise Exception(f"Exceed max tries to ensure pod {name}'s phase ({expected_phase})")
-    stdout = run(f'kubectl get pods {name} -o json', True)
+    stdout = run(f'kubectl get pods {name} -n {ns} -o json', True)
     if not stdout:
         if expected_phase == 'Deleted':
             return
@@ -58,7 +58,7 @@ def ensure_pod_phase(name, expected_phase='Running', tries=1):
         if stdout_json['status']['phase'] == expected_phase:
             return
     time.sleep(3)
-    ensure_pod_phase(name, expected_phase, tries+1)
+    ensure_pod_phase(name, expected_phase, ns, tries+1)
 
 
 def run(script, quiet=False):
