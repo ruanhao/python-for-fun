@@ -38,10 +38,12 @@ def ensure_namespace_phase(name, expected_phase='Active', tries=1):
         raise Exception(f"Exceed max tries to ensure namespace {name}'s status ({expected_phase})")
     stdout = run(f'kubectl get ns {name} -o json', True)
     if not stdout:
-        return
-    stdout_json = json.loads(stdout)
-    if stdout_json['status']['phase'] == expected_phase:
-        return
+        if expected_phase == 'Deleted':
+            return
+    else:
+        stdout_json = json.loads(stdout)
+        if stdout_json['status']['phase'] == expected_phase:
+            return
     time.sleep(3)
     ensure_namespace_phase(name, expected_phase, tries+1)
 

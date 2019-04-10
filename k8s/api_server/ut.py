@@ -7,6 +7,7 @@ import json
 import yaml
 from k8s_utils import run
 from k8s_utils import ensure_pod_phase
+from k8s_utils import ensure_namespace_phase
 from contextlib import redirect_stdout
 from contextlib import redirect_stderr
 
@@ -50,12 +51,14 @@ class UnitTest(unittest.TestCase):
         run("kubectl exec curl-custom-sa -c main -- curl -s localhost:8001/api/v1/pods")
 
 
-    def test_rbac(self):
+    def test_rbac_with_role_and_rolebinding(self):
         '''
         minikube start --extra-config=apiserver.authorization-mode=RBAC
         '''
         run('kubectl delete ns foo', True)
         run('kubectl delete ns bar', True)
+        ensure_namespace_phase('foo', 'Deleted')
+        ensure_namespace_phase('bar', 'Deleted')
 
 
         run('kubectl create ns foo')
@@ -72,19 +75,20 @@ class UnitTest(unittest.TestCase):
         # The default permissions for a ServiceAccount don't allow it to list or modify any resources.
         self.assertEqual(json.loads(stdout)['code'], 403)
 
-        with self.subTest("Role and RoleBinding"):
-            # These two Roles will allow you to list Services in the foo and bar namespaces from within your two pods
-            run('kubectl create -f service-reader.yaml -n foo')  # create role in namespace foo
-            # Instead of creating the Role from a YAML file, you could also create it with the special kubectl create role command
-            run('kubectl create role service-reader --verb=get --verb=list --resource=services -n bar')
 
-            # Binding Role to ServiceAccount
-            run('kubectl create rolebinding test --role=service-reader --serviceaccount=foo:default -n foo')
+        # These two Roles will allow you to list Services in the foo and bar namespaces from within your two pods
+        run('kubectl create -f service-reader.yaml -n foo')  # create role in namespace foo
+        # Instead of creating the Role from a YAML file, you could also create it with the special kubectl create role command
+        run('kubectl create role service-reader --verb=get --verb=list --resource=services -n bar')
 
-            # now it is ok
-            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/namespaces/foo/services")
-            self.assertEqual(json.loads(stdout)['kind'], "ServiceList")
+        # Binding Role to ServiceAccount
+        run('kubectl create rolebinding test --role=service-reader --serviceaccount=foo:default -n foo')
 
+        # now it is ok
+        stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/namespaces/foo/services")
+        self.assertEqual(json.loads(stdout)['kind'], "ServiceList")
+
+        with self.subTest("Including serviceaccounts from other namespaces in a rolebinding"):
             run('kubectl get rolebindings test -o yaml -n foo')  # before modification
             json_def = json.loads(run('kubectl get rolebindings test -o json -n foo', True))
             json_def['subjects'][0]['namespace'] = 'bar'
@@ -98,3 +102,78 @@ class UnitTest(unittest.TestCase):
             # can see service in foo namespace
             stdout = run(f"kubectl exec {bar_pod_name} -n bar -- curl -s localhost:8001/api/v1/namespaces/foo/services")
             self.assertEqual(json.loads(stdout)['kind'], "ServiceList")
+
+
+
+    def test_rbac_with_cluster_role_and_rolebinding(self):
+        run('kubectl delete clusterrole pv-reader', True)
+        run('kubectl delete clusterrolebinding pv-test', True)
+        run('kubectl delete clusterrolebinding view-test', True)
+        run('kubectl delete ns foo', True)
+        run('kubectl delete ns bar', True)
+        ensure_namespace_phase('foo', 'Deleted')
+        ensure_namespace_phase('bar', 'Deleted')
+        run('kubectl create ns foo', True)
+        run('kubectl create ns bar', True)
+        run('kubectl run test --image=luksa/kubectl-proxy -n foo')
+        run('kubectl run test --image=luksa/kubectl-proxy -n bar')
+        pod_name = run("kubectl get pod -n foo -o jsonpath='{.items[0].metadata.name}'", True)
+        ensure_pod_phase(pod_name, expected_phase='Running', ns='foo')
+
+
+        with self.subTest("Allowing access to cluster-level resources"):
+            # the default ServiceAccount can’t list PersistentVolumes.
+            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/persistentvolumes", True)
+            self.assertEqual(json.loads(stdout)['code'], 403)
+
+            run('kubectl create clusterrole pv-reader --verb=get,list --resource=persistentvolumes')
+            run('kubectl create rolebinding pv-test --clusterrole=pv-reader --serviceaccount=foo:default -n foo')
+
+            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/persistentvolumes", True)
+            self.assertEqual(json.loads(stdout)['code'], 403)  # must use ClusterRoleBinding to grant access to cluster-level resources
+
+            run('kubectl create clusterrolebinding pv-test --clusterrole=pv-reader --serviceaccount=foo:default')
+            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/persistentvolumes")
+            self.assertEqual(json.loads(stdout)['kind'], "PersistentVolumeList")
+
+        with self.subTest("Allowing access to non-resource URLs"):
+            '''
+            API server also exposes non-resource URLs.
+            Access to these URLs must also be granted explicitly; otherwise the API server will reject the client’s request.
+            Usually, this is done for you automatically through the system:discovery ClusterRole and the identically named ClusterRoleBinding.
+            '''
+            minikube_ip = run('minikube ip', True)
+            # making request as an unauthenticated user
+            run(f'curl https://{minikube_ip}:8443/api -k -s')
+
+        with self.subTest("Using clusterroles to grant access to resources in specific namespaces"):
+            '''
+            ClusterRoles don’t always need to be bound with cluster-level ClusterRoleBindings.
+            They can also be bound with regular, namespaced RoleBindings.
+
+            1. If you create a ClusterRoleBinding and reference the ClusterRole in it,
+               the subjects listed in the binding can view the specified resources across all namespaces.
+            2. If, on the other hand, you create a RoleBinding,
+               the subjects listed in the binding can only view resources in the namespace of the RoleBinding.
+            '''
+
+            # case 1
+            run('kubectl create clusterrolebinding view-test --clusterrole=view --serviceaccount=foo:default')
+            # view pods in namespace foo
+            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/namespaces/foo/pods")
+            self.assertEqual(json.loads(stdout)['kind'], "PodList")
+            # view pods in namespace bar
+            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/namespaces/bar/pods")
+            self.assertEqual(json.loads(stdout)['kind'], "PodList")
+            # retrieve pods across all namespaces
+            run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/pods")
+
+            # case 2
+            run('kubectl delete clusterrolebinding view-test')
+            run('kubectl create rolebinding view-test --clusterrole=view --serviceaccount=foo:default -n foo')
+            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/namespaces/foo/pods")
+            self.assertEqual(json.loads(stdout)['kind'], "PodList")
+            stdout = run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/namespaces/bar/pods")
+            self.assertEqual(json.loads(stdout)['code'], 403)
+            run(f"kubectl exec {pod_name} -n foo -- curl -s localhost:8001/api/v1/pods")
+            self.assertEqual(json.loads(stdout)['code'], 403)
