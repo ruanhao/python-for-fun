@@ -6,8 +6,11 @@ from k8s_utils import run
 from k8s_utils import ensure_pod_phase
 from k8s_utils import ensure_namespace_phase
 from k8s_utils import get_pod_phase
+from k8s_utils import init_test_env
 import time
 import subprocess
+
+NAME_SPACE = "pod-test"
 
 
 class UnitTest(unittest.TestCase):
@@ -100,3 +103,56 @@ class UnitTest(unittest.TestCase):
             run('kubectl label node minikube gpu=true --overwrite')
             run('kubectl get node -L gpu')
             run('kubectl create -f kubia-gpu.yaml')
+
+
+    def test_using_host_node_namespaces(self):
+        init_test_env(NAME_SPACE)
+
+        with self.subTest("Using node network namespace"):
+            run(f'kubectl create -f pod-with-host-network.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-with-host-network', 'Running', NAME_SPACE)
+            stdout = run(f'kubectl exec pod-with-host-network -n {NAME_SPACE} -- ifconfig')
+            self.assertIn('docker0', stdout)
+
+
+        with self.subTest("Binding host port without using host network namespace"):
+            run(f'kubectl create -f kubia-hostport.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('kubia-hostport', "Running", NAME_SPACE)
+            minikube_ip = run('minikube ip', True)
+            run(f'curl -s http://{minikube_ip}:9000/')
+
+
+        with self.subTest("Using node PID and IPC namespaces"):
+            run(f'kubectl create -f pod-with-host-pid-and-ipc.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-with-host-pid-and-ipc', 'Running', NAME_SPACE)
+            run(f'kubectl exec pod-with-host-pid-and-ipc -n {NAME_SPACE} -- ps aux')
+
+
+    def test_configuring_container_security_context(self):
+        init_test_env(NAME_SPACE)
+        run(f'kubectl run pod-with-defaults --image alpine --restart Never --namespace {NAME_SPACE} -- /bin/sleep 999999')
+        ensure_pod_phase("pod-with-defaults", 'Running', NAME_SPACE)
+
+        with self.subTest("Running a container as a specific user"):
+            run(f'kubectl create -f pod-as-user-guest.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-as-user-guest', 'Running', NAME_SPACE)
+            stdout = run(f'kubectl exec pod-as-user-guest -n {NAME_SPACE} -- id -u')
+            self.assertEqual(stdout, '405')
+
+        with self.subTest("Running container in privileged mode"):
+            run(f'kubectl create -f pod-privileged.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-privileged', 'Running', NAME_SPACE)
+            stdout1 = run(f'kubectl exec pod-with-defaults -n {NAME_SPACE} -- ls /dev')
+            stdout2 = run(f'kubectl exec pod-privileged -n {NAME_SPACE} -- ls /dev')
+            # the privileged container sees all the host node's devices. This means it can use any device freely.
+            self.assertGreater(len(stdout2.split()), len(stdout1.split()))
+
+        with self.subTest("Adding individual kernel capabilities to a container"):
+            stdout = run(f'kubectl exec pod-with-defaults -n {NAME_SPACE} -- date -s "12:00:00" 2>&1')
+            self.assertIn("can't", stdout)
+            run(f'kubectl create -f pod-add-settime-capability.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-add-settime-capability', 'Running', NAME_SPACE)
+            run(f'kubectl exec pod-add-settime-capability -n {NAME_SPACE} -- date +%T -s "12:00:00"')
+            stdout = run(f'kubectl exec pod-add-settime-capability -n {NAME_SPACE} -- date +%T')
+            self.assertIn('12:00:0', stdout)
+            run('minikube ssh date')  # node date will be changed, but it can be changed back quickly due to NTP.

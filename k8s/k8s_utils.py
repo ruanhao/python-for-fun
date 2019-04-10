@@ -89,3 +89,9 @@ def get_ingress_address(name, tries=1):
             return ip_addr
         time.sleep(3)
         tries += 1
+
+
+def init_test_env(ns):
+    run(f"kubectl delete ns {ns}", True)
+    ensure_namespace_phase(ns, 'Deleted')
+    run(f"kubectl create ns {ns}", True)
