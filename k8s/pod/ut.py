@@ -156,3 +156,32 @@ class UnitTest(unittest.TestCase):
             stdout = run(f'kubectl exec pod-add-settime-capability -n {NAME_SPACE} -- date +%T')
             self.assertIn('12:00:0', stdout)
             run('minikube ssh date')  # node date will be changed, but it can be changed back quickly due to NTP.
+
+        with self.subTest('Dropping capabilities from a container'):
+            run(f'kubectl create -f pod-drop-chown-capability.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-drop-chown-capability', 'Running', NAME_SPACE)
+            stdout = run(f'kubectl exec pod-drop-chown-capability -n {NAME_SPACE} -- chown guest /tmp 2>&1', True)
+            self.assertIn('Operation not permitted', stdout)
+
+
+        with self.subTest("Preventing processes from writing to the container's filesystem"):
+            run(f'kubectl create -f pod-with-readonly-filesystem.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-with-readonly-filesystem', 'Running', NAME_SPACE)
+            stdout = run(f'kubectl exec pod-with-readonly-filesystem -n {NAME_SPACE} -- touch /newfile 2>&1', True)
+            self.assertIn('Read-only', stdout)
+            run(f'kubectl exec pod-with-readonly-filesystem -n {NAME_SPACE} -- touch /volume/newfile')
+            stdout = run(f'kubectl exec pod-with-readonly-filesystem -n {NAME_SPACE} -- ls -l /volume')
+            self.assertIn('newfile', stdout)
+
+        with self.subTest("Sharing volumes when containers run as different users"):
+            run(f'kubectl create -f pod-with-shared-volume-fsgroup.yaml -n {NAME_SPACE}')
+            ensure_pod_phase('pod-with-shared-volume-fsgroup', 'Running', NAME_SPACE)
+            run(f'kubectl exec pod-with-shared-volume-fsgroup -n {NAME_SPACE} -c first -- id')
+            stdout = run(f'kubectl exec pod-with-shared-volume-fsgroup -n {NAME_SPACE} -c first -- id -G', True)
+            self.assertEqual(stdout.split(), ['0', '555', '666', '777'])
+            stdout = run(f'kubectl exec pod-with-shared-volume-fsgroup -n {NAME_SPACE} -c first -- ls -l / | grep volume')
+            self.assertIn('555', stdout)
+            # fsGroup security context property is used when the process cre- ates files IN A VOLUME
+            run(f'kubectl exec pod-with-shared-volume-fsgroup -n {NAME_SPACE} -c first -- touch /tmp/foo')
+            stdout = run(f'kubectl exec pod-with-shared-volume-fsgroup -n {NAME_SPACE} -c first -- ls -l /tmp/')
+            self.assertNotIn('555', stdout)
