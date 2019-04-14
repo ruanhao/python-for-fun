@@ -14,8 +14,18 @@ def get_pod_phase(name):
     stdout_json = json.loads(stdout)
     return stdout_json['status']['phase']
 
-def is_rc_ready(name):
-    stdout = run(f'kubectl get rc {name} -o json', True)
+def is_rc_ready(name, ns='default'):
+    stdout = run(f'kubectl get rc {name} -o json -n {ns}', True)
+    if not stdout:
+        return False
+    status = json.loads(stdout).get('status')
+    ready = status.get('readyReplicas')
+    if not ready:
+        return False
+    return status['replicas'] == ready
+
+def is_deploy_ready(name, ns='default'):
+    stdout = run(f'kubectl get deploy {name} -o json -n {ns}', True)
     if not stdout:
         return False
     status = json.loads(stdout).get('status')
@@ -25,13 +35,25 @@ def is_rc_ready(name):
     return status['replicas'] == ready
 
 
-def ensure_rc_ready(name, tries=1):
+
+
+
+
+def ensure_rc_ready(name, ns='default', tries=1):
     if tries > 60:
         raise Exception(f"Exceed max tries to ensure rc {name} ready")
-    if is_rc_ready(name):
+    if is_rc_ready(name, ns):
         return
     time.sleep(3)
-    ensure_rc_ready(name, tries+1)
+    ensure_rc_ready(name, ns, tries+1)
+
+def ensure_deploy_ready(name, ns='default', tries=1):
+    if tries > 60:
+        raise Exception(f"Exceed max tries to ensure rc {name} ready")
+    if is_deploy_ready(name, ns):
+        return
+    time.sleep(3)
+    ensure_deploy_ready(name, ns, tries+1)
 
 def ensure_namespace_phase(name, expected_phase='Active', tries=1):
     if tries > 60:
@@ -95,3 +117,13 @@ def init_test_env(ns):
     run(f"kubectl delete ns {ns}", True)
     ensure_namespace_phase(ns, 'Deleted')
     run(f"kubectl create ns {ns}", True)
+
+
+def ensure_replicas(name, replicas, type_='deploy', ns='default', tries=1):
+    stdout = run(f"kubectl get {type_} {name} -n {ns} -o jsonpath='{{.status.replicas}}'", True)
+    if stdout and int(stdout) == replicas:
+        return
+    if tries > 60:
+        raise Exception(f"Exceed max tries to ensure {type_} {name}'s replicas: {replicas}")
+    time.sleep(10)
+    ensure_replicas(name, replicas, type_, ns, tries+1)

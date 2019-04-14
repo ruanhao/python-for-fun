@@ -4,13 +4,16 @@
 import unittest
 from k8s_utils import run
 from k8s_utils import ensure_pod_phase
+from k8s_utils import ensure_deploy_ready
 from k8s_utils import ensure_namespace_phase
+from k8s_utils import ensure_replicas
 from k8s_utils import get_pod_phase
 from k8s_utils import init_test_env
 import time
 import subprocess
 
 NAME_SPACE = "pod-test"
+NS = NAME_SPACE
 
 
 class UnitTest(unittest.TestCase):
@@ -185,3 +188,55 @@ class UnitTest(unittest.TestCase):
             run(f'kubectl exec pod-with-shared-volume-fsgroup -n {NAME_SPACE} -c first -- touch /tmp/foo')
             stdout = run(f'kubectl exec pod-with-shared-volume-fsgroup -n {NAME_SPACE} -c first -- ls -l /tmp/')
             self.assertNotIn('555', stdout)
+
+    def test_auto_scaling_based_on_cpu(self):
+        init_test_env(NS)
+
+        # create deployment first
+        run(f'kubectl create -f deployment.yaml -n {NS}')
+        ensure_deploy_ready('kubia', NS)
+        ensure_replicas('kubia', 3, 'deploy', NS)
+
+        # create HPA (have to enable Heapster and metrics-server:)
+        # minikube addons enable heapster
+        # minikube addons enable metrics-server
+        run(f'kubectl autoscale deployment kubia --cpu-percent=30 --min=1 --max=5 -n {NS}')
+
+        # show HPA
+        run(f'kubectl get hpa kubia -o yaml -n {NS}')
+
+        # Because you're running three pods that are currently receiving no requests,
+        # which means their CPU usage should be close to zero,
+        # you should expect the Autoscaler to scale them down to a single pod.
+        ensure_replicas('kubia', 1, 'deploy', NS)
+
+        # expose pod to service
+        run(f'kubectl expose deployment kubia --port=80 --target-port=8080 -n {NS}')
+
+        # create loadgenerator pod
+        run(f'kubectl run --restart=Never loadgenerator --image=busybox -n {NS} -- sh -c "while true; do wget -O - -q http://kubia.{NS}; done"')
+        ensure_pod_phase('loadgenerator', 'Running', NS)
+
+        # autoscaler increase the number of replicas.
+        ensure_replicas('kubia', 4, 'deploy', NS)
+        run(f'kubectl top pod -n {NS}')
+        run(f'kubectl get hpa -n {NS}')
+        cpu_util_percent = int(run(f"kubectl get hpa kubia -n {NS} -o jsonpath='{{.status.currentCPUUtilizationPercentage}}'"))
+        self.assertLessEqual(cpu_util_percent/4, 30)
+
+
+    def test_auto_scaling_down_with_pod_disruption_budget(self):
+        init_test_env(NS)
+
+        run(f"kubectl create pdb kubia-pdb --selector=app=kubia --min-available=2 -n {NS}")
+        run(f"kubectl get pdb kubia-pdb -o yaml -n {NS}")
+
+        # create deployment
+        run(f'kubectl create -f deployment.yaml -n {NS}')
+        ensure_deploy_ready('kubia', NS)
+        ensure_replicas('kubia', 3, 'deploy', NS)
+
+        # create hpa
+        run(f'kubectl autoscale deployment kubia --cpu-percent=30 --min=1 --max=5 -n {NS}')
+        # pdb has nothing to do with hpa
+        ensure_replicas('kubia', 1, 'deploy', NS)
