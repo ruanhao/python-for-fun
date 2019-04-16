@@ -240,3 +240,69 @@ class UnitTest(unittest.TestCase):
         run(f'kubectl autoscale deployment kubia --cpu-percent=30 --min=1 --max=5 -n {NS}')
         # pdb has nothing to do with hpa
         ensure_replicas('kubia', 1, 'deploy', NS)
+
+
+    def test_init_container(self):
+        init_test_env(NS)
+
+        run(f'kubectl create -f fortune-client.yaml -n {NS}')
+        # The STATUS column shows that zero of one init containers have finished.
+        run(f'kubectl get pod -n {NS}')
+        run(f'kubectl create -f fortune-server.yaml -n {NS}')
+        ensure_pod_phase('fortune-server', 'Running', NS)
+        run(f'kubectl get pod fortune-client -n {NS}')
+        ensure_pod_phase('fortune-client', 'Running', NS)
+
+    def test_post_start_hook(self):
+        init_test_env(NS)
+        with self.subTest("Using an command hook handler"):
+            run(f'kubectl create -f post-start-hook.yaml -n {NS}')
+            ensure_pod_phase('pod-with-poststart-hook', 'Pending', NS)
+            time.sleep(60)
+            run(f'kubectl describe pod pod-with-poststart-hook -n {NS}')
+            run(f'kubectl get pod pod-with-poststart-hook -n {NS}')
+
+        with self.subTest("Using an HTTP GET hook handler"):
+            run(f'kubectl create -f post-start-hook-httpget.yaml -n {NS}')
+            ensure_pod_phase('pod-with-poststart-http-hook', 'Pending', NS)
+            time.sleep(60)
+            run(f'kubectl describe pod pod-with-poststart-http-hook -n {NS}')
+            run(f'kubectl get pod pod-with-poststart-http-hook -n {NS}')
+
+
+    def test_pre_stop_hook(self):
+        init_test_env(NS)
+        with self.subTest("Using an command hook handler"):
+            run(f'kubectl create -f pre-stop-hook-command.yaml -n {NS}')
+            ensure_pod_phase('pod-with-prestop-hook', 'Running', NS)
+            time.sleep(60)
+            run(f'kubectl describe pod pod-with-prestop-hook -n {NS}')
+            run(f'kubectl get pod pod-with-prestop-hook -n {NS}')
+
+        with self.subTest("Using an HTTP GET hook handler"):
+            run(f'kubectl create -f pre-stop-hook-httpget.yaml -n {NS}')
+            ensure_pod_phase('pod-with-prestop-http-hook', 'Running', NS)
+            time.sleep(60)
+            run(f'kubectl describe pod pod-with-prestop-http-hook -n {NS}')
+            run(f'kubectl get pod pod-with-prestop-http-hook -n {NS}')
+
+    def test_providing_information_on_process_terminated(self):
+        '''
+        Show the reason why a container terminated in the pod's status.
+        You do this by having the process write a termination message to a specific file in the container's filesystem.
+        The default file the process needs to write the message to is /dev/termination-log,
+        but it can be changed by setting the `terminationMessagePath` field in the container definition in the pod spec.
+        '''
+        init_test_env(NS)
+
+        with self.subTest("Terminating unsuccessfully"):
+            run(f'kubectl create -f termination-message.yaml -n {NS}')
+            ensure_pod_phase('pod-with-termination-message', 'Running', NS)
+            stdout = run(f'kubectl describe po pod-with-termination-message -n {NS} | grep -C5 "Message:"')
+            self.assertIn("I've had enough", stdout)
+
+        with self.subTest("Terminating successfully"):
+            run(f'kubectl create -f termination-message-success.yaml -n {NS}')
+            ensure_pod_phase('successful-pod-with-termination-message', 'Succeeded', NS)
+            stdout = run(f'kubectl describe po successful-pod-with-termination-message -n {NS} | grep -C5 "Message:"')
+            self.assertIn("I've completed my task", stdout)
