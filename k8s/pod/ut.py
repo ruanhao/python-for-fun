@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import unittest
+import random
 from k8s_utils import run
 from k8s_utils import ensure_pod_phase
 from k8s_utils import ensure_deploy_ready
@@ -306,3 +307,19 @@ class UnitTest(unittest.TestCase):
             ensure_pod_phase('successful-pod-with-termination-message', 'Succeeded', NS)
             stdout = run(f'kubectl describe po successful-pod-with-termination-message -n {NS} | grep -C5 "Message:"')
             self.assertIn("I've completed my task", stdout)
+
+
+    def test_node_affinity(self):
+        '''
+        Run this testcase under EKS
+        '''
+        init_test_env(NS)
+        nodes = run(f"kubectl get node -o jsonpath='{{.items[*].metadata.name}}'", True).split()
+        for node in nodes:
+            run(f'kubectl label node {node} gpu-', True)  # delete label first
+        node = random.choice(nodes)
+        run(f'kubectl label node {node} gpu=true')
+        run(f'kubectl create -f kubia-gpu-nodeaffinity.yaml -n {NS}')
+        ensure_pod_phase('kubia-gpu', 'Running', NS)
+        stdout = run(f'kubectl get pod kubia-gpu -o wide -n {NS}')
+        self.assertIn(node, stdout)
