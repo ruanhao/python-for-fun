@@ -24,8 +24,8 @@ def is_rc_ready(name, ns='default'):
         return False
     return status['replicas'] == ready
 
-def is_deploy_ready(name, ns='default'):
-    stdout = run(f'kubectl get deploy {name} -o json -n {ns}', True)
+def is_deploy_ready(name, ns='default', quiet=True):
+    stdout = run(f'kubectl get deploy {name} -o json -n {ns}', quiet)
     if not stdout:
         return False
     status = json.loads(stdout).get('status')
@@ -42,7 +42,8 @@ def is_deploy_ready(name, ns='default'):
 def ensure_rc_ready(name, ns='default', tries=1):
     if tries > 60:
         raise Exception(f"Exceed max tries to ensure rc {name} ready")
-    if is_rc_ready(name, ns):
+    quiet = False if tries > 20 else True
+    if is_rc_ready(name, ns, quiet):
         return
     time.sleep(3)
     ensure_rc_ready(name, ns, tries+1)
@@ -119,11 +120,11 @@ def init_test_env(ns):
     run(f"kubectl create ns {ns}", True)
 
 
-def ensure_replicas(name, replicas, type_='deploy', ns='default', tries=1):
-    stdout = run(f"kubectl get {type_} {name} -n {ns} -o jsonpath='{{.status.replicas}}'", True)
-    if stdout and int(stdout) == replicas:
+def ensure_replicas(name, ready_replicas, type_='deploy', ns='default', tries=1):
+    stdout = run(f"kubectl get {type_} {name} -n {ns} -o jsonpath='{{.status.readyReplicas}}'", True)
+    if stdout and int(stdout) == ready_replicas:
         return
     if tries > 60:
-        raise Exception(f"Exceed max tries to ensure {type_} {name}'s replicas: {replicas}")
+        raise Exception(f"Exceed max tries to ensure {type_} {name}'s replicas: {ready_replicas}")
     time.sleep(10)
-    ensure_replicas(name, replicas, type_, ns, tries+1)
+    ensure_replicas(name, ready_replicas, type_, ns, tries+1)

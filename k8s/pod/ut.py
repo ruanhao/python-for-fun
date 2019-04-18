@@ -311,15 +311,95 @@ class UnitTest(unittest.TestCase):
 
     def test_node_affinity(self):
         '''
-        Run this testcase under EKS
+        Run this testcase under EKS with at least 2 worker nodes
         '''
         init_test_env(NS)
         nodes = run(f"kubectl get node -o jsonpath='{{.items[*].metadata.name}}'", True).split()
         for node in nodes:
             run(f'kubectl label node {node} gpu-', True)  # delete label first
-        node = random.choice(nodes)
-        run(f'kubectl label node {node} gpu=true')
-        run(f'kubectl create -f kubia-gpu-nodeaffinity.yaml -n {NS}')
-        ensure_pod_phase('kubia-gpu', 'Running', NS)
-        stdout = run(f'kubectl get pod kubia-gpu -o wide -n {NS}')
-        self.assertIn(node, stdout)
+            run(f'kubectl label node {node} availability-zone-', True)
+            run(f'kubectl label node {node} share-type-', True)
+
+        with self.subTest("Specifying hard node affinity rules"):
+            node = random.choice(nodes)
+            run(f'kubectl label node {node} gpu=true')
+            run(f'kubectl create -f kubia-gpu-nodeaffinity.yaml -n {NS}')
+            ensure_pod_phase('kubia-gpu', 'Running', NS)
+            stdout = run(f'kubectl get pod kubia-gpu -o wide -n {NS}')
+            self.assertIn(node, stdout)
+
+        with self.subTest("Prioritizing nodes when scheduling a pod"):
+            node1 = nodes[0]
+            node2 = nodes[1]
+            run(f'kubectl label node {node1} availability-zone=zone1', True)
+            run(f'kubectl label node {node1} share-type=dedicated', True)
+            run(f'kubectl label node {node2} availability-zone=zone2', True)
+            run(f'kubectl label node {node2} share-type=shared', True)
+            run(f'kubectl get node -L availability-zone -L share-type')
+            run(f'kubectl create -f preferred-deployment.yaml -n {NS}')
+            ensure_deploy_ready('pref', NS)
+            # Nodes whose 'availability-zone' and 'share-type' labels match the pod's node affinity are ranked the highest.
+            # Next come the 'shared' nodes in 'zone1', then come the 'dedicated' nodes in the other zones,
+            # and at the lowest priority are all the other nodes.
+            run(f'kubectl get po -l app=pref -o wide -n {NS}')
+            node1_num = int(run(f'kubectl get po -l app=pref -o wide -n {NS} | grep {node1} | wc -l', True))
+            node2_num = int(run(f'kubectl get po -l app=pref -o wide -n {NS} | grep {node2} | wc -l', True))
+            self.assertGreater(node1_num, node2_num)
+
+
+    def test_pod_affinity(self):
+        '''
+        Run this testcase under EKS with at least 2 worker nodes
+        '''
+        init_test_env(NS)
+        # First, deploy the backend pod
+        run(f'kubectl run backend -l app=backend --image busybox -n {NS} -- sleep 999999')
+        ensure_deploy_ready('backend', NS)
+
+        with self.subTest("Using inter-pod affinity to deploy pods on the same node"):
+            '''
+            Deploy a backend pod and five frontend pod replicas with pod affinity configured
+            so that they're all deployed on the same node as the backend pod.
+            '''
+            run(f'kubectl create -f frontend-podaffinity-host.yaml -n {NS}')
+            ensure_deploy_ready('frontend', NS)
+            run(f'kubectl get po -o wide -n {NS}')
+
+            backend_node = run(f"kubectl get po -l app=backend -n {NS} -o jsonpath='{{.items[*].spec.nodeName}}'", True)
+            frontend_nodes = run(f"kubectl get po -l app=frontend -n {NS} -o jsonpath='{{.items[*].spec.nodeName}}'", True).split()
+            self.assertEqual(len(set(frontend_nodes)), 1)
+            self.assertEqual(frontend_nodes[0], backend_node)
+
+            # If you now delete the backend pod, the Scheduler will schedule the pod to origin node.
+            # You can confirm the Scheduler takes other pods' pod affinity rules INTO ACCOUNT.
+            old_backend_pod = run(f"kubectl get po -l app=backend -n {NS} -o jsonpath='{{.items[*].metadata.name}}'", True)
+            run(f"kubectl delete pod -l app=backend -n {NS}")
+            ensure_pod_phase(old_backend_pod, 'Deleted', NS)
+            new_backend_node = run(f"kubectl get po -l app=backend -n {NS} -o jsonpath='{{.items[*].spec.nodeName}}'", True)
+            self.assertEqual(backend_node, new_backend_node)
+
+        with self.subTest("Expressing pod affinity preferences"):
+            run(f'kubectl create -f frontend-podaffinity-preferred-host.yaml -n {NS}')
+            ensure_deploy_ready('frontend-pref', NS)
+            run(f"kubectl get pod -l app=frontend-pref -o wide -n {NS}")
+            frontend_pref_nodes = run(f"kubectl get po -l app=frontend-pref -n {NS} -o jsonpath='{{.items[*].spec.nodeName}}'", True).split()
+            backend_node_num = frontend_pref_nodes.count(backend_node)
+            other_node_num = len(frontend_pref_nodes) - backend_node_num
+            # Scheduler will prefer backend_node for frontend-pref pods,
+            # but may schedule pods to other nodes as well.
+            self.assertGreater(backend_node_num, other_node_num)
+
+
+        with self.subTest("Using anti-affinity to spread apart pods of the same deployment"):
+            init_test_env(NS)   # remove test history first
+            run(f'kubectl create -f frontend-podantiaffinity-host.yaml -n {NS}')
+            ensure_replicas('frontend-anti', 3, 'deploy', NS)
+
+            running_pods = run(f"""kubectl get pod -n {NS} -o jsonpath='{{.items[?(@.status.phase=="Running")].metadata.name}}'""", True).split()
+            pending_pods = run(f"""kubectl get pod -n {NS} -o jsonpath='{{.items[?(@.status.phase=="Pending")].metadata.name}}'""", True).split()
+            run(f'kubectl get pod -n {NS} -o wide')
+            node_num = len(run(f"kubectl get node -o jsonpath='{{.items[*].metadata.name}}'", True).split())
+            # Every node has only one pod, remaining pods are all Pending,
+            # because the Scheduler isn't allowed to schedule them to the same nodes.
+            self.assertEqual(len(running_pods), node_num)
+            self.assertEqual(len(pending_pods), 5-node_num)
