@@ -1,6 +1,5 @@
 {
     "aws_vpc_id": "vpc-86176def",
     "aws_subnet_id": "subnet-c1a7efa8",
-    "aws_region": "us-east-2",
-    "aws_instance_type": "m4.large"
+    "aws_region": "us-east-2"
 }
