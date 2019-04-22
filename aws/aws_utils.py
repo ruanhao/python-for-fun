@@ -1,0 +1,93 @@
+#! /usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sys
+import subprocess
+import boto3
+import inspect
+
+ec2_client = boto3.client('ec2')
+cf_client = boto3.client('cloudformation')
+
+def get_default_vpc():
+    return ec2_client.describe_vpcs(
+        Filters=[
+            {
+                'Name': 'isDefault',
+                'Values': ["true"]
+            }
+        ]
+    )['Vpcs'][0]['VpcId']
+
+def get_first_subnet(vpc_id=None):
+    if vpc_id is None:
+        vpc_id = get_default_vpc()
+
+    return ec2_client.describe_subnets(
+        Filters=[
+            {
+                'Name': 'vpc-id',
+                'Values': [vpc_id]
+            }
+        ]
+    )['Subnets'][0]['SubnetId']
+
+
+def get_azs(region=None):
+    if region is not None:
+        client = boto3.client('ec2', region_name=region)
+    else:
+        client = ec2_client
+    azresp = client.describe_availability_zones(Filters=[{'Name':'state','Values':['available']}])
+    return [i['ZoneName'] for i in azresp['AvailabilityZones']]
+
+
+def run(script, quiet=False):
+    if quiet is False:
+        print(f"====== {script} ======")
+    proc = subprocess.Popen(['bash', '-c', script],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdin=subprocess.PIPE)
+    stdout, stderr = proc.communicate(timeout=30)
+    stdout_str = stdout.decode('utf-8').rstrip('\n')
+    stderr_str = stderr.decode('utf-8').rstrip('\n')
+    if quiet is False:
+        print(f'{stdout_str}')
+        print(f'{stderr_str}', file=sys.stderr)
+        if proc.returncode:
+            raise Exception('Exit Code: %s' % proc.returncode)
+    return stdout_str
+
+
+def key_find(lst, key, value):
+    return next((item for item in lst if item[key] == value), None)
+
+
+def dump_template(t, quiet=False, format='yaml'):
+    output = getattr(t, f'to_{format}')()
+    if quiet is False:
+        print(output)
+    caller = inspect.stack()[1].function
+    with open(f'/tmp/{caller}.{format}', 'w+') as fp:
+        fp.write(output)
+
+def init_cf_env(stack_name):
+    cf_client.delete_stack(StackName=stack_name)
+    cf_client.get_waiter('stack_delete_complete').wait(StackName=stack_name)
+
+
+def get_ubuntu_image_id():
+    response = ec2_client.describe_images(
+            Filters=[
+                {
+                    'Name': 'name',
+                    'Values': ['ubuntu/images/hvm-ssd/ubuntu-xenial-16.04-amd64-server-????????']
+                },
+                {
+                    'Name': 'state',
+                    'Values': ['available']
+                }
+            ],
+            Owners=['099720109477'],
+        )
+    return sorted(response['Images'], key=lambda img: img.get('CreationDate'))[-1]['ImageId']
