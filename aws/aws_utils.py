@@ -48,7 +48,7 @@ def run(script, quiet=False):
     proc = subprocess.Popen(['bash', '-c', script],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.PIPE)
-    stdout, stderr = proc.communicate(timeout=30)
+    stdout, stderr = proc.communicate(timeout=60)
     stdout_str = stdout.decode('utf-8').rstrip('\n')
     stderr_str = stderr.decode('utf-8').rstrip('\n')
     if quiet is False:
@@ -89,5 +89,21 @@ def get_ubuntu_image_id():
                 }
             ],
             Owners=['099720109477'],
+        )
+    return sorted(response['Images'], key=lambda img: img.get('CreationDate'))[-1]['ImageId']
+
+def get_linux2_image_id():
+    response = ec2_client.describe_images(
+            Filters=[
+                {
+                    'Name': 'name',
+                    'Values': ['amzn2-ami-hvm-2.0.????????-x86_64-gp2']
+                },
+                {
+                    'Name': 'state',
+                    'Values': ['available']
+                }
+            ],
+            Owners=['amazon'],
         )
     return sorted(response['Images'], key=lambda img: img.get('CreationDate'))[-1]['ImageId']

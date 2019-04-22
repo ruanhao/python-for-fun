@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import datetime
+import time
 import unittest
 import boto3
 from aws_utils import *
@@ -53,7 +54,10 @@ class UnitTest(unittest.TestCase):
         run("aws ec2 describe-images --owners 309956199498 --filters 'Name=name,Values=RHEL-7.5_HVM_GA*' 'Name=state,Values=available' --output json | jq -r '.Images | sort_by(.CreationDate) | last(.[]).ImageId'")
 
 
-    def test_troposphere(self):
+    def test_creating_all_in_one(self):
+        '''
+        Create VPC, Subnets, IGW, Route, SecurityGroup, Instance at once.
+        '''
         test_stack_name = 'TestStack'
         cf_client.delete_stack(StackName=test_stack_name)
         cf_client.get_waiter('stack_delete_complete').wait(StackName=test_stack_name)
@@ -116,6 +120,7 @@ class UnitTest(unittest.TestCase):
 
         t.add_resource(Route(
             "IGWRoute",
+            DependsOn='IGWAttachment',
             GatewayId=Ref("InternetGateway"),
             DestinationCidrBlock="0.0.0.0/0",
             RouteTableId=Ref("RouteTable"),
@@ -221,6 +226,7 @@ class UnitTest(unittest.TestCase):
         cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
         public_ip = key_find(cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs'],
                              'OutputKey', 'PublicIP')['OutputValue']
+        time.sleep(5)
         run(f"ssh -o 'StrictHostKeyChecking no' ubuntu@{public_ip} curl -s ifconfig.me")  # run ssh-add <KEY> beforehand
 
 
@@ -232,15 +238,34 @@ class UnitTest(unittest.TestCase):
         now = str(datetime.datetime.now())
 
         t = Template()
+        security_group = t.add_resource(SecurityGroup(
+            "SecurityGroup",
+            GroupDescription="Enable all ingress",
+            VpcId=get_default_vpc(),
+            SecurityGroupIngress=[
+                SecurityGroupRule(
+                    IpProtocol='tcp',
+                    CidrIp="0.0.0.0/0",
+                    FromPort=0,
+                    ToPort=65535
+                ),
+            ],
+            Tags=Tags(
+                Application=Ref("AWS::StackName"),
+                Developer="cisco::haoru",
+            )
+        ))
         instance = t.add_resource(Instance(
-            "Instance",
+            "MyInstance",
             KeyName=KEY,
+            # SecurityGroupIds=[Ref(security_group)],
             InstanceType="m4.xlarge",
-            ImageId=get_ubuntu_image_id(),
+            ImageId=get_linux2_image_id(),  # linux2 has /opt/aws/bin/cfn-signal preinstalled
             NetworkInterfaces=[
                 NetworkInterfaceProperty(
                     AssociatePublicIpAddress=True,
                     DeviceIndex=0,
+                    GroupSet=[Ref(security_group)],
                     SubnetId=get_first_subnet()
                 ),
             ],
@@ -249,11 +274,11 @@ class UnitTest(unittest.TestCase):
                 f'echo "{now}" > /tmp/now\n',
                 '/opt/aws/bin/cfn-signal -e $? ',
                 '                --stack ', Ref("AWS::StackName"),
-                '                --resource EC2Instance ',
+                '                --resource MyInstance ',
                 '                --region ', Ref("AWS::Region"), '\n'
             ])),
             CreationPolicy=CreationPolicy(
-                ResourceSignal=ResourceSignal(Timeout='PT5M')  # 5 mins
+                ResourceSignal=ResourceSignal(Timeout='PT10M')
             ),
             Tags=Tags(
                 Name="aws test user data",
@@ -281,5 +306,5 @@ class UnitTest(unittest.TestCase):
         cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
         public_ip = key_find(cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs'],
                              'OutputKey', 'PublicIP')['OutputValue']
-        actual = run(f"ssh -o 'StrictHostKeyChecking no' ubuntu@{public_ip} cat /tmp/now")
+        actual = run(f"ssh -o 'StrictHostKeyChecking no' ec2-user@{public_ip} cat /tmp/now")
         self.assertEqual(actual, now)
