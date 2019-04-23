@@ -5,6 +5,9 @@ import sys
 import subprocess
 import boto3
 import inspect
+import os
+from troposphere import Tags, Ref
+from troposphere.ec2 import SecurityGroup, SecurityGroupRule, NetworkInterfaceProperty, Instance
 
 ec2_client = boto3.client('ec2')
 cf_client = boto3.client('cloudformation')
@@ -107,3 +110,68 @@ def get_linux2_image_id():
             Owners=['amazon'],
         )
     return sorted(response['Images'], key=lambda img: img.get('CreationDate'))[-1]['ImageId']
+
+
+def get_my_key():
+    return os.getenv("MY_AWS_KEY", 'cisco-aws-key')
+
+
+def ts_add_instance_with_public_ip(t,
+                                   security_group_ref,
+                                   name='MyInstance',
+                                   image_id=None,
+                                   subnet_id=None,
+                                   tag="aws test instance"):
+    if image_id is None:
+        image_id = get_linux2_image_id()
+    if subnet_id is None:
+        subnet_id = get_first_subnet()
+
+    return t.add_resource(Instance(
+        name,
+        KeyName=get_my_key(),
+        InstanceType="m4.xlarge",
+        ImageId=image_id,
+        NetworkInterfaces=[
+            NetworkInterfaceProperty(
+                AssociatePublicIpAddress=True,
+                DeviceIndex=0,
+                GroupSet=[security_group_ref],  # associates the security group
+                SubnetId=subnet_id
+            ),
+        ],
+        Tags=Tags(
+            Name=tag,
+            Application=Ref("AWS::StackName"),
+            Developer="cisco::haoru",
+        ),
+    ))
+
+
+
+def ts_add_security_group(t, vpc_id=None, name='MySecurityGroup', desc='Enable all ingress'):
+    if vpc_id is None:
+        vpc_id = get_default_vpc()
+    return t.add_resource(SecurityGroup(
+        name,
+        GroupDescription=desc,
+        VpcId=vpc_id,
+        SecurityGroupIngress=[
+            SecurityGroupRule(
+                IpProtocol='tcp',
+                CidrIp="0.0.0.0/0",
+                FromPort=0,
+                ToPort=65535
+            ),
+        ],
+        Tags=Tags(
+            Application=Ref("AWS::StackName"),
+            Developer="cisco::haoru",
+        )
+    ))
+
+def get_ec2_client():
+    return boto3.client('ec2')
+
+def get_cf_client():
+    return boto3.client('cloudformation')

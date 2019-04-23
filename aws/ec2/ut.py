@@ -24,7 +24,7 @@ from troposphere.ec2 import (Route,
 ec2_client = boto3.client('ec2')
 cf_client = boto3.client('cloudformation')
 
-KEY = 'cisco-aws-key'
+KEY = get_my_key()
 
 class UnitTest(unittest.TestCase):
 
@@ -258,7 +258,6 @@ class UnitTest(unittest.TestCase):
         instance = t.add_resource(Instance(
             "MyInstance",
             KeyName=KEY,
-            # SecurityGroupIds=[Ref(security_group)],
             InstanceType="m4.xlarge",
             ImageId=get_linux2_image_id(),  # linux2 has /opt/aws/bin/cfn-signal preinstalled
             NetworkInterfaces=[
@@ -270,15 +269,15 @@ class UnitTest(unittest.TestCase):
                 ),
             ],
             UserData=Base64(Join('', [
-                '#!/bin/bash -xe\n',
+                '#!/bin/bash -xe\n',  # user data that begins with shebang will be executed
                 f'echo "{now}" > /tmp/now\n',
-                '/opt/aws/bin/cfn-signal -e $? ',
+                '/opt/aws/bin/cfn-signal -e $? ',  # send signal to let cloud formation know it is ready
                 '                --stack ', Ref("AWS::StackName"),
                 '                --resource MyInstance ',
                 '                --region ', Ref("AWS::Region"), '\n'
             ])),
             CreationPolicy=CreationPolicy(
-                ResourceSignal=ResourceSignal(Timeout='PT10M')
+                ResourceSignal=ResourceSignal(Timeout='PT10M')  # expect to receive signal in 10 mins
             ),
             Tags=Tags(
                 Name="aws test user data",
