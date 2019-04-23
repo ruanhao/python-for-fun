@@ -21,8 +21,8 @@ from troposphere.ec2 import (Route,
                              SecurityGroupRule,
                              NetworkInterfaceProperty)
 
-ec2_client = boto3.client('ec2')
-cf_client = boto3.client('cloudformation')
+ec2_client = get_ec2_client()
+cf_client = get_cf_client()
 
 KEY = get_my_key()
 
@@ -307,3 +307,128 @@ class UnitTest(unittest.TestCase):
                              'OutputKey', 'PublicIP')['OutputValue']
         actual = run(f"ssh -o 'StrictHostKeyChecking no' ec2-user@{public_ip} cat /tmp/now")
         self.assertEqual(actual, now)
+
+
+    def test_security_group(self):
+        with self.subTest("Allowing ICMP and SSH"):
+            test_stack_name = "TestSecurityGroupForIcmpAndSsh"
+            init_cf_env(test_stack_name)
+            ###
+            t = Template()
+            sg = t.add_resource(SecurityGroup(
+                "MySecurityGroup",
+                GroupDescription="Allow ICMP/SSH Traffic",
+                VpcId=get_default_vpc(),
+                SecurityGroupIngress=[
+                    SecurityGroupRule(
+                        IpProtocol='icmp',
+                        CidrIp='0.0.0.0/0',
+                        FromPort=-1,  # -1 means every port
+                        ToPort=-1
+                    ),
+                    SecurityGroupRule(
+                        IpProtocol='tcp',
+                        CidrIp='0.0.0.0/0',
+                        FromPort=22,
+                        ToPort=22
+                    ),
+                ]
+            ))
+            instance = ts_add_instance_with_public_ip(t, Ref(sg), tag='aws test icmp and ssh')
+            t.add_output([
+                Output(
+                    "InstanceId",
+                    Description="InstanceId of the newly created EC2 instance",
+                    Value=Ref(instance),
+                ),
+                Output(
+                    "PublicIP",
+                    Description="Public IP address of the newly created EC2 instance",
+                    Value=GetAtt(instance, "PublicIp"),
+                ),
+            ])
+            dump_template(t, True)
+            cf_client.create_stack(
+                StackName=test_stack_name,
+                TemplateBody=t.to_yaml()
+            )
+            cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
+            time.sleep(10)
+            public_ip = key_find(cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs'],
+                                 'OutputKey', 'PublicIP')['OutputValue']
+            run(f'ping -c 3 {public_ip}')
+            run(f"ssh -o 'StrictHostKeyChecking no' ec2-user@{public_ip} hostname")
+
+        with self.subTest("Allowing SSH traffic from a source security group"):
+            '''
+            1. Allow SSH access to the bastion host from 0.0.0.0/0 or a specific source address.
+            2. Allow SSH access to all other virtual machines only if the traffic source is the bastion host.
+            '''
+            test_stack_name = "TestSecurityGroupForBastionMode"
+            init_cf_env(test_stack_name)
+            ###
+            t = Template()
+            sg_bastion = t.add_resource(SecurityGroup(
+                "SecurityGroupBastionHost",
+                GroupDescription='Allowing incoming SSH and ICPM from anywhere.',
+                VpcId=get_default_vpc(),
+                SecurityGroupIngress=[
+                    SecurityGroupRule(
+                        IpProtocol='icmp',
+                        CidrIp='0.0.0.0/0',
+                        FromPort=-1,
+                        ToPort=-1
+                    ),
+                    SecurityGroupRule(
+                        IpProtocol='tcp',
+                        CidrIp='0.0.0.0/0',
+                        FromPort=22,
+                        ToPort=22
+                    ),
+                ]
+            ))
+            sg_instance = t.add_resource(SecurityGroup(
+                "SecurityGroupInstance",
+                GroupDescription='Allowing incoming SSH from the Bastion Host Security Group.',
+                VpcId=get_default_vpc(),
+                SecurityGroupIngress=[
+                    SecurityGroupRule(
+                        IpProtocol='tcp',
+                        SourceSecurityGroupId=Ref(sg_bastion),
+                        FromPort=22,
+                        ToPort=22
+                    ),
+                ]
+            ))
+            bastion = ts_add_instance_with_public_ip(t, Ref(sg_bastion), name='Bastion')
+            instance = ts_add_instance_with_public_ip(t, Ref(sg_instance), name='Instance')
+            t.add_output([
+                Output(
+                    "BastionPublicIP",
+                    Description="Public IP address of the newly created EC2 bastion instance",
+                    Value=GetAtt(bastion, "PublicIp"),
+                ),
+                Output(
+                    "InstancePublicIP",
+                    Description="Public IP address of the newly created EC2 instance",
+                    Value=GetAtt(instance, "PublicIp"),
+                ),
+                Output(
+                    "InstancePublicName",
+                    Value=GetAtt(instance, "PublicDnsName"),
+                ),
+            ])
+            dump_template(t, True)
+            cf_client.create_stack(
+                StackName=test_stack_name,
+                TemplateBody=t.to_yaml()
+            )
+            cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
+            time.sleep(10)
+            outputs = cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs']
+            bastion_public_ip = get_output_value(outputs, 'BastionPublicIP')
+            instance_public_ip = get_output_value(outputs, 'InstancePublicIP')
+            instance_public_name = get_output_value(outputs, 'InstancePublicName')
+            # do ssh-add <key> beforehand
+            actual_instance_public_ip = run(f'ssh -o StrictHostKeyChecking=no -A ec2-user@{bastion_public_ip} ssh -o StrictHostKeyChecking=no ec2-user@{instance_public_name} curl -s http://169.254.169.254/latest/meta-data/public-ipv4')
+            self.assertEqual(actual_instance_public_ip, instance_public_ip)

@@ -175,3 +175,6 @@ def get_ec2_client():
 
 def get_cf_client():
     return boto3.client('cloudformation')
+
+def get_output_value(outputs, key):
+    return key_find(outputs, 'OutputKey', key)['OutputValue']
