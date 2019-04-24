@@ -121,7 +121,8 @@ def ts_add_instance_with_public_ip(t,
                                    name='MyInstance',
                                    image_id=None,
                                    subnet_id=None,
-                                   tag="aws test instance"):
+                                   tag="aws test instance",
+                                   public=True):
     if image_id is None:
         image_id = get_linux2_image_id()
     if subnet_id is None:
@@ -134,8 +135,9 @@ def ts_add_instance_with_public_ip(t,
         ImageId=image_id,
         NetworkInterfaces=[
             NetworkInterfaceProperty(
-                AssociatePublicIpAddress=True,
+                AssociatePublicIpAddress=public,
                 DeviceIndex=0,
+                DeleteOnTermination=True,
                 GroupSet=[security_group_ref],  # associates the security group
                 SubnetId=subnet_id
             ),

@@ -10,6 +10,8 @@ from troposphere import Base64, FindInMap, GetAtt, Join, Output, Sub
 from troposphere import Parameter, Ref, Tags, Template
 from troposphere.policies import CreationPolicy, ResourceSignal
 from troposphere.ec2 import (Route,
+                             EIP,
+                             NatGateway,
                              SubnetRouteTableAssociation,
                              Subnet,
                              RouteTable,
@@ -25,6 +27,7 @@ ec2_client = get_ec2_client()
 cf_client = get_cf_client()
 
 KEY = get_my_key()
+SSH_OPTIONS = "-o StrictHostKeyChecking=no -o LogLevel=ERROR"
 
 class UnitTest(unittest.TestCase):
 
@@ -140,6 +143,8 @@ class UnitTest(unittest.TestCase):
                     Developer="cisco::haoru",
                 )
             ))
+            # have to do this, or else subnet will use vpc default router table,
+            # which only has one entry of default local route.
             t.add_resource(SubnetRouteTableAssociation(
                 "SubnetRouteTableAssociation{0}".format(i),
                 SubnetId=Ref("PublicSubnet{0}".format(i)),
@@ -176,7 +181,6 @@ class UnitTest(unittest.TestCase):
                 Application=Ref("AWS::StackName"),
                 Developer="cisco::haoru",
             ),
-            # UserData=Base64(Ref(webport_param)),
         ))
 
         t.add_output([
@@ -432,3 +436,117 @@ class UnitTest(unittest.TestCase):
             # do ssh-add <key> beforehand
             actual_instance_public_ip = run(f'ssh -o StrictHostKeyChecking=no -A ec2-user@{bastion_public_ip} ssh -o StrictHostKeyChecking=no ec2-user@{instance_public_name} curl -s http://169.254.169.254/latest/meta-data/public-ipv4')
             self.assertEqual(actual_instance_public_ip, instance_public_ip)
+
+
+    def test_nat_gateway(self):
+        test_stack_name = 'TestNatGateway'
+        init_cf_env(test_stack_name)
+        ###
+        t = Template()
+        vpc = t.add_resource(VPC(
+            "MyVPC",
+            EnableDnsSupport="true",
+            CidrBlock="10.99.0.0/16",
+            EnableDnsHostnames="true",
+        ))
+        sg = ts_add_security_group(t, vpc_id=Ref(vpc))
+        igw = t.add_resource(InternetGateway(
+            "MyIGW",
+        ))
+        vpc_gw_attachment = t.add_resource(VPCGatewayAttachment(  # attachment DOES NOT mean adding a default route to IGW for VPC route table
+            "IGWAttachment",
+            VpcId=Ref(vpc),
+            InternetGatewayId=Ref(igw)
+        ))
+
+        public_subnet = t.add_resource(Subnet(
+            "PublicSubnet",
+            VpcId=Ref(vpc),
+            CidrBlock="10.99.1.0/24",
+            MapPublicIpOnLaunch=True,
+        ))
+        public_subnet_rt = t.add_resource(RouteTable(
+            "RouteTableForPublicSubnet",
+            VpcId=Ref(vpc),     # route table belongs to vpc
+        ))
+        t.add_resource(Route(
+            "DefaultRouteForPublicSubnet",
+            DependsOn="IGWAttachment",
+            GatewayId=Ref(igw),
+            DestinationCidrBlock="0.0.0.0/0",
+            RouteTableId=Ref(public_subnet_rt),
+        ))
+        t.add_resource(SubnetRouteTableAssociation(
+            "PublicSubnetRouteTableAssociation",
+            SubnetId=Ref(public_subnet),
+            RouteTableId=Ref(public_subnet_rt)
+        ))
+
+        eip = t.add_resource(EIP(     # elastic ip for nat gw
+            "NATGatewayElasticIP",
+            Domain="vpc"
+        ))
+        nat_gw = t.add_resource(NatGateway(
+            "NatGateway",
+            AllocationId=GetAtt(eip, "AllocationId"),
+            SubnetId=Ref(public_subnet)
+        ))
+
+
+        private_subnet = t.add_resource(Subnet(
+            "PrivateSubnet",
+            VpcId=Ref(vpc),
+            CidrBlock="10.99.2.0/24",
+        ))
+        private_subnet_rt = t.add_resource(RouteTable(
+            "RouteTableForPrivateSubnet",
+            VpcId=Ref(vpc),     # route table belongs to vpc
+        ))
+        t.add_resource(Route(
+            "DefaultRouteForPrivateSubnet",
+            NatGatewayId=Ref(nat_gw),  # route to nat gw
+            DestinationCidrBlock="0.0.0.0/0",
+            RouteTableId=Ref(private_subnet_rt),
+        ))
+        t.add_resource(SubnetRouteTableAssociation(
+            "PrivateSubnetRouteTableAssociation",
+            SubnetId=Ref(private_subnet),
+            RouteTableId=Ref(private_subnet_rt)
+        ))
+
+        bastion = ts_add_instance_with_public_ip(t, Ref(sg), name='Bastion', subnet_id=Ref(public_subnet), tag='NATBastion', public=True)
+        bastion.DependsOn = "DefaultRouteForPublicSubnet"
+        instance = ts_add_instance_with_public_ip(t, Ref(sg), name='Instance', subnet_id=Ref(private_subnet), tag='NATInstance', public=False)
+        instance.DependsOn = "DefaultRouteForPrivateSubnet"
+
+        t.add_output([
+            Output(
+                "BastionPublicIP",
+                Description="Public IP address of the newly created EC2 bastion instance",
+                Value=GetAtt(bastion, "PublicIp"),
+            ),
+            Output(
+                "InstancePrivateIP",
+                Description="Private IP address of the newly created EC2 instance",
+                Value=GetAtt(instance, "PrivateIp"),
+            ),
+            Output(
+                "EIPAllocationId",
+                Value=GetAtt(eip, "AllocationId"),
+            ),
+        ])
+
+        dump_template(t, True)
+        cf_client.create_stack(
+            StackName=test_stack_name,
+            TemplateBody=t.to_yaml()
+        )
+        cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
+        time.sleep(10)
+        outputs = cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs']
+        bastion_public_ip = get_output_value(outputs, 'BastionPublicIP')
+        instance_private_ip = get_output_value(outputs, 'InstancePrivateIP')
+        eip_allocation_id = get_output_value(outputs, 'EIPAllocationId')
+        eip_addr = ec2_client.describe_addresses(Filters=[{'Name': 'allocation-id', 'Values': [eip_allocation_id]}])['Addresses'][0]['PublicIp']
+        actual_egress_ip = run(f"ssh {SSH_OPTIONS} -A ec2-user@{bastion_public_ip} ssh {SSH_OPTIONS} {instance_private_ip} curl -s ifconfig.me")
+        self.assertEqual(eip_addr, actual_egress_ip)
