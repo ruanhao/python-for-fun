@@ -7,10 +7,12 @@ import unittest
 import boto3
 from aws_utils import *
 from troposphere import Base64, FindInMap, GetAtt, Join, Output, Sub
-from troposphere import Parameter, Ref, Tags, Template
+from troposphere import Parameter, Ref, Tags, Template, Condition, Equals
 from troposphere.policies import CreationPolicy, ResourceSignal
 from troposphere.ec2 import (Route,
                              EIP,
+                             Volume,
+                             VolumeAttachment,
                              NatGateway,
                              SubnetRouteTableAssociation,
                              Subnet,
@@ -71,8 +73,7 @@ class UnitTest(unittest.TestCase):
 
         keyname_param = t.add_parameter(Parameter(
             "KeyName",
-            Description="Name of an existing EC2 KeyPair to enable SSH "
-            "access to the instance",
+            Description="Name of an existing EC2 KeyPair to enable SSH access to the instance",
             Type="String",
         ))
 
@@ -550,3 +551,107 @@ class UnitTest(unittest.TestCase):
         eip_addr = ec2_client.describe_addresses(Filters=[{'Name': 'allocation-id', 'Values': [eip_allocation_id]}])['Addresses'][0]['PublicIp']
         actual_egress_ip = run(f"ssh {SSH_OPTIONS} -A ec2-user@{bastion_public_ip} ssh {SSH_OPTIONS} {instance_private_ip} curl -s ifconfig.me")
         self.assertEqual(eip_addr, actual_egress_ip)
+
+    def test_attaching_ebs_to_instance(self):
+        test_stack_name = 'TestAttachAdditionalEbsVolume'
+        init_cf_env(test_stack_name)
+        ###
+
+        t = Template()
+        attached_param = t.add_parameter(Parameter(
+            "AttachVolume",
+            Description="Should the volume be attached?",
+            Type="String",
+            Default="yes",
+            AllowedValues=['yes', 'no'],
+        ))
+        attached_condition = t.add_condition("Attached", Equals(Ref(attached_param), 'yes'))
+        sg = ts_add_security_group(t)
+        instance = ts_add_instance_with_public_ip(t, Ref(sg), tag='test ebs')
+        volume = t.add_resource(Volume(
+            "MyVolume",
+            AvailabilityZone=GetAtt(instance, "AvailabilityZone"),
+            Size=8,             # 8G
+            VolumeType='gp2',
+        ))
+        t.add_resource(VolumeAttachment(
+            "MyVolumeAttachment",
+            Condition="Attached",
+            Device='/dev/xvdh',
+            InstanceId=Ref(instance),
+            VolumeId=Ref(volume)
+        ))
+        t.add_output([
+            Output(
+                "PublicIP",
+                Value=GetAtt(instance, "PublicIp"),
+            ),
+            Output(
+                "VolumeId",
+                Description="InstanceId of the created ebs volume",
+                Value=Ref(volume),
+            ),
+        ])
+
+        dump_template(t, True)
+        create_stack(test_stack_name, t)
+        outputs = get_stack_outputs(test_stack_name)
+        public_ip = get_output_value(outputs, 'PublicIP')
+        volume_id = get_output_value(outputs, 'VolumeId')
+        stdout = run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo fdisk -l')
+        self.assertIn('/dev/xvdh', stdout)
+        # The first time you use a newly created EBS volume, you must create a filesystem.
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo mkfs -t ext4 /dev/xvdh')
+        # After the filesystem has been created, you can mount the device:
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo mkdir /mnt/volume/')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo mount /dev/xvdh /mnt/volume/')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} df -h')
+
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo touch /mnt/volume/testfile')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo umount /mnt/volume/') # if you do not umount it first, the ebs status will be 'busy' after dettachment
+        # dettach it
+        update_stack(test_stack_name, t, [{
+            'ParameterKey': 'AttachVolume',
+            'ParameterValue': 'no'
+        }])
+        stdout = run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo fdisk -l')
+        self.assertNotIn('/dev/xvdh', stdout)
+
+        # attach again
+        update_stack(test_stack_name, t, [{
+            'ParameterKey': 'AttachVolume',
+            'ParameterValue': 'yes'
+        }])
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo mount /dev/xvdh /mnt/volume/')
+        stdout = run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} ls /mnt/volume/testfile')
+        self.assertIn('testfile', stdout)  # file still there
+
+        with self.subTest("Performance"):
+            # writing performance
+            run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/dev/zero of=/mnt/volume/tempfile bs=1M count=1024')  # write 1 MB, 1024 times
+            # flush caches
+            run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} "echo 3 | sudo tee /proc/sys/vm/drop_caches"', True)
+            # reading performance
+            run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/mnt/volume/tempfile of=/dev/null bs=1M count=1024')  # read 1 MB, 1024 times
+
+        with self.subTest("Creating snapshot"):
+            '''
+            Creating a snapshot of an attached, mounted volume is possible, but can cause problems with writes that aren't flushed to disk.
+            You should either detach the volume from your instance or stop the instance first.
+            If you absolutely must create a snapshot while the volume is in use, you can `freeze` it first.
+            Unfreeze the volume as soon as the snapshot reaches the state pending. You don't have to wait until the snapshot has finished.
+            '''
+            run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo fsfreeze -f /mnt/volume')  # Freeze all writes on the vm
+            volume_resource = boto3.resource('ec2').Volume(volume_id)
+            snapshot = volume_resource.create_snapshot()
+            snapshot.wait_until_completed()
+            run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo fsfreeze -u /mnt/volume')  # Unfreeze to resume writes on the vm
+            run(f'aws ec2 describe-snapshots --snapshot-ids {snapshot.id}')
+            new_volume_id = ec2_client.create_volume(
+                AvailabilityZone=get_azs()[0],
+                SnapshotId=snapshot.id,
+            )['VolumeId']
+            run(f'aws ec2 describe-volumes --volume-ids {new_volume_id}')
+
+            boto3.resource('ec2').Volume(new_volume_id).delete()
+            snapshot.delete()

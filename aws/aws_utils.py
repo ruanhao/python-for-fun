@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import sys
+import time
 import subprocess
 import boto3
 import inspect
@@ -184,3 +185,30 @@ def get_s3_client():
 
 def get_output_value(outputs, key):
     return key_find(outputs, 'OutputKey', key)['OutputValue']
+
+def create_stack(stack_name, template, params=None):
+    args = {
+        "StackName": stack_name,
+        "TemplateBody": template.to_yaml()
+    }
+    if params is not None:
+        args['Parameters'] = params
+    cf_client.create_stack(**args)
+    cf_client.get_waiter('stack_create_complete').wait(StackName=stack_name)
+    time.sleep(5)              # wait some time to ensure instance ready
+
+def update_stack(stack_name, template, params=None):
+    args = {
+        "StackName": stack_name,
+        "TemplateBody": template.to_yaml()
+    }
+    if params is not None:
+        args['Parameters'] = params
+    cf_client.update_stack(**args)
+    cf_client.get_waiter('stack_update_complete').wait(StackName=stack_name)
+    time.sleep(5)              # wait some time to ensure instance ready
+
+
+
+def get_stack_outputs(stack_name):
+    return cf_client.describe_stacks(StackName=stack_name)['Stacks'][0]['Outputs']
