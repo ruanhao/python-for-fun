@@ -118,7 +118,7 @@ def get_my_key():
 
 
 def ts_add_instance_with_public_ip(t,
-                                   security_group_ref,
+                                   security_group,
                                    name='MyInstance',
                                    image_id=None,
                                    subnet_id=None,
@@ -139,7 +139,7 @@ def ts_add_instance_with_public_ip(t,
                 AssociatePublicIpAddress=public,
                 DeviceIndex=0,
                 DeleteOnTermination=True,
-                GroupSet=[security_group_ref],  # associates the security group
+                GroupSet=[security_group],  # associates the security group
                 SubnetId=subnet_id
             ),
         ],
@@ -195,7 +195,7 @@ def create_stack(stack_name, template, params=None):
         args['Parameters'] = params
     cf_client.create_stack(**args)
     cf_client.get_waiter('stack_create_complete').wait(StackName=stack_name)
-    time.sleep(5)              # wait some time to ensure instance ready
+    time.sleep(10)              # wait some time to ensure instance ready
 
 def update_stack(stack_name, template, params=None):
     args = {
@@ -206,7 +206,7 @@ def update_stack(stack_name, template, params=None):
         args['Parameters'] = params
     cf_client.update_stack(**args)
     cf_client.get_waiter('stack_update_complete').wait(StackName=stack_name)
-    time.sleep(5)              # wait some time to ensure instance ready
+    time.sleep(10)              # wait some time to ensure instance ready
 
 
 

@@ -13,6 +13,8 @@ from troposphere.ec2 import (Route,
                              EIP,
                              Volume,
                              VolumeAttachment,
+                             BlockDeviceMapping,
+                             EBSBlockDevice,
                              NatGateway,
                              SubnetRouteTableAssociation,
                              Subnet,
@@ -655,3 +657,49 @@ class UnitTest(unittest.TestCase):
 
             boto3.resource('ec2').Volume(new_volume_id).delete()
             snapshot.delete()
+
+
+
+    def test_using_ephemeral_instance_store(self):
+        '''
+        EC2 instance is launched from an EBS-backed root volume (which is the default).
+        Ephemeral instance stores aren't standalone resources like EBS volumes; it is part of your EC2 instance.
+        Ephemeral storage is predefined by instance type.
+        '''
+        test_stack_name = 'TestInstanceStore'
+        init_cf_env(test_stack_name)
+        ###
+
+        t = Template()
+        sg = ts_add_security_group(t)
+        instance = ts_add_instance_with_public_ip(t, Ref(sg))
+        instance.InstanceType = 'm5ad.large'  # ephemeral storage is predefined by instance type
+        instance.BlockDeviceMappings = [      # use block device mapping to specify device
+            BlockDeviceMapping(
+                DeviceName='/dev/xvda',  # EBS root volume (OS lives here)
+                Ebs=EBSBlockDevice(VolumeSize=20, VolumeType='gp2')
+            ),
+        ]
+        t.add_output([
+            Output(
+                "PublicIP",
+                Value=GetAtt(instance, "PublicIp"),
+            ),
+        ])
+        dump_template(t, True)
+        create_stack(test_stack_name, t)
+        outputs = get_stack_outputs(test_stack_name)
+        public_ip = get_output_value(outputs, 'PublicIP')
+        stdout = run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo fdisk -l')
+        stdout = run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} lsblk')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo mkfs -t ext4 /dev/nvme1n1')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo mkdir /mnt/volume/')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo mount /dev/nvme1n1 /mnt/volume/')
+        # write performance comparision
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/dev/zero of=/mnt/volume/tempfile bs=1M count=1024')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} "echo 3 | sudo tee /proc/sys/vm/drop_caches"', True)
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/dev/zero of=/tempfile bs=1M count=1024')  # write to ebs
+        # read performance comparision
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/mnt/volume/tempfile of=/dev/null bs=1M count=1024')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} "echo 3 | sudo tee /proc/sys/vm/drop_caches"', True)
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/tempfile of=/dev/null bs=1M count=1024')
