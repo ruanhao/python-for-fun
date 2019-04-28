@@ -9,6 +9,7 @@ from aws_utils import *
 from troposphere import Base64, FindInMap, GetAtt, Join, Output, Sub
 from troposphere import Parameter, Ref, Tags, Template, Condition, Equals
 from troposphere.policies import CreationPolicy, ResourceSignal
+from troposphere.efs import FileSystem, MountTarget
 from troposphere.ec2 import (Route,
                              EIP,
                              Volume,
@@ -703,3 +704,91 @@ class UnitTest(unittest.TestCase):
         run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/mnt/volume/tempfile of=/dev/null bs=1M count=1024')
         run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} "echo 3 | sudo tee /proc/sys/vm/drop_caches"', True)
         run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip} sudo dd if=/tempfile of=/dev/null bs=1M count=1024')
+
+
+    def test_efs(self):
+        test_stack_name = 'TestNFSUsingEFS'
+        init_cf_env(test_stack_name)
+        ###
+        t = Template()
+        fs = t.add_resource(FileSystem(
+            "MyFileSystem"
+        ))
+
+        client_sg = ts_add_security_group(t, name="ClientSecurityGroup")
+        efs_client_sg = t.add_resource(SecurityGroup(
+            "EFSClientSecurityGroup",  # This security group is just used to mark traffic to Mount Target
+            GroupDescription="EFS Mount target client",
+            VpcId=get_default_vpc()
+        ))
+        mt_security_group = t.add_resource(SecurityGroup(
+            "MountTargetSecurityGroup",
+            GroupDescription='EFS Mount target',
+            VpcId=get_default_vpc(),
+            SecurityGroupIngress=[
+                SecurityGroupRule(
+                    IpProtocol='tcp',
+                    SourceSecurityGroupId=Ref(efs_client_sg),  # Only allow traffic from the EFS client security group.
+                    FromPort=2049,
+                    ToPort=2049
+                ),
+            ],
+        ))
+
+        mount_target_a = t.add_resource(MountTarget(
+            "MountTargetA",
+            FileSystemId=Ref(fs),
+            SecurityGroups=[Ref(mt_security_group)],
+            SubnetId=get_first_subnet()
+        ))
+        mount_target_b = t.add_resource(MountTarget(
+            "MountTargetB",
+            FileSystemId=Ref(fs),
+            SecurityGroups=[Ref(mt_security_group)],
+            SubnetId=get_subnet(index=1)
+        ))
+
+        instance_a = ts_add_instance_with_public_ip(t, [Ref(client_sg), Ref(efs_client_sg)], name='InstanceA', subnet_id=get_first_subnet())
+        instance_a.DependsOn = "MountTargetA"
+        instance_b = ts_add_instance_with_public_ip(t, [Ref(client_sg), Ref(efs_client_sg)], name='InstanceB', subnet_id=get_subnet(index=1))
+        instance_b.DependsOn = "MountTargetB"
+
+        t.add_output([
+            Output(
+                "PublicIPA",
+                Value=GetAtt(instance_a, "PublicIp"),
+            ),
+            Output(
+                "PublicIPB",
+                Value=GetAtt(instance_b, "PublicIp"),
+            ),
+            Output(
+                "Region",
+                Value=Ref("AWS::Region")
+            ),
+            Output(
+                "FileSystemId",
+                Value=Ref(fs)
+            ),
+        ])
+
+        dump_template(t, True)
+        create_stack(test_stack_name, t)
+        outputs = get_stack_outputs(test_stack_name)
+        public_ip_a = get_output_value(outputs, 'PublicIPA')
+        public_ip_b = get_output_value(outputs, 'PublicIPB')
+        region = get_output_value(outputs, 'Region')
+        fs_id = get_output_value(outputs, 'FileSystemId')
+
+        nfs_url = f'{fs_id}.efs.{region}.amazonaws.com'  # use mount target IP if across VPC or on-premise
+        share_path = '/var/share'
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_a} sudo mkdir {share_path}')
+        run(f"""ssh {SSH_OPTIONS} ec2-user@{public_ip_a} 'echo "{nfs_url}:/ {share_path} nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" | sudo tee -a /etc/fstab'""")
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_a} sudo mount -a')
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_a} sudo touch {share_path}/hello')
+
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_b} sudo mkdir {share_path}')
+        run(f"""ssh {SSH_OPTIONS} ec2-user@{public_ip_b} 'echo "{nfs_url}:/ {share_path} nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0" | sudo tee -a /etc/fstab'""")
+        run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_b} sudo mount -a')
+        stdout = run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_b} sudo ls {share_path}')
+        self.assertIn('hello', stdout)

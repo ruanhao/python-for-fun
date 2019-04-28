@@ -23,7 +23,8 @@ def get_default_vpc():
         ]
     )['Vpcs'][0]['VpcId']
 
-def get_first_subnet(vpc_id=None):
+
+def get_subnet(vpc_id=None, index=0):
     if vpc_id is None:
         vpc_id = get_default_vpc()
 
@@ -34,7 +35,10 @@ def get_first_subnet(vpc_id=None):
                 'Values': [vpc_id]
             }
         ]
-    )['Subnets'][0]['SubnetId']
+    )['Subnets'][index]['SubnetId']
+
+def get_first_subnet(vpc_id=None):
+    return get_subnet(vpc_id, 0)
 
 
 def get_azs(region=None):
@@ -139,7 +143,7 @@ def ts_add_instance_with_public_ip(t,
                 AssociatePublicIpAddress=public,
                 DeviceIndex=0,
                 DeleteOnTermination=True,
-                GroupSet=[security_group],  # associates the security group
+                GroupSet=security_group if isinstance(security_group, list) else [security_group],  # associates the security groups
                 SubnetId=subnet_id
             ),
         ],
