@@ -6,10 +6,13 @@ import time
 import unittest
 import boto3
 from aws_utils import *
-from troposphere import Base64, FindInMap, GetAtt, Join, Output, Sub
-from troposphere import Parameter, Ref, Tags, Template, Condition, Equals
+from troposphere import (Base64, FindInMap, GetAtt, Join, Output, Sub,
+                         Parameter, Ref, Tags, Template, Condition, Equals)
 from troposphere.policies import CreationPolicy, ResourceSignal
 from troposphere.efs import FileSystem, MountTarget
+from troposphere.cloudformation import Init, InitConfig
+from troposphere.autoscaling import LaunchConfiguration, AutoScalingGroup, Tag, Metadata
+from troposphere.elasticloadbalancingv2 import LoadBalancer, Listener, TargetGroup, ListenerRule, Action, Matcher
 from troposphere.ec2 import (Route,
                              EIP,
                              Volume,
@@ -792,3 +795,122 @@ class UnitTest(unittest.TestCase):
         run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_b} sudo mount -a')
         stdout = run(f'ssh {SSH_OPTIONS} ec2-user@{public_ip_b} sudo ls {share_path}')
         self.assertIn('hello', stdout)
+
+    def test_using_load_balancer(self):
+        test_stack_name = "TestALB"
+        init_cf_env(test_stack_name)
+        ###
+
+        t = Template()
+        load_balancer_sg = ts_add_security_group(t, name="LoadBalancerSecurityGroup")
+        instance_sg = ts_add_security_group(t)
+
+        load_balancer = t.add_resource(LoadBalancer(
+            "MyLoadBalancer",
+            SecurityGroups=[Ref(load_balancer_sg)],
+            # The ALB is publicly accessible.
+            # (use `internal` instead of `internet-facing` to define a load balancer reachable from private network only)
+            Scheme='internet-facing',
+            Subnets=[get_subnet(index=0), get_subnet(index=1)],  # Attaches the ALB to the subnets
+            Type='application'
+        ))
+        target_group = t.add_resource(TargetGroup(
+            "MyTargetGroup",
+            HealthCheckIntervalSeconds=10,
+            HealthCheckProtocol='HTTP',
+            HealthCheckPath='/index.html',
+            HealthCheckTimeoutSeconds=5,
+            HealthyThresholdCount=3,
+            UnhealthyThresholdCount=2,
+            Matcher=Matcher(HttpCode='200-299'),  # If HTTP status code is 2XX, the backend is considered healthy.
+            Port=80,                              # The web server on the EC2 instances listens on port 80.
+            Protocol='HTTP',
+            VpcId=get_default_vpc(),
+        ))
+        listener = t.add_resource(Listener(
+            "MyListener",
+            LoadBalancerArn=Ref(load_balancer),
+            Port=80,
+            Protocol='HTTP',    # The load balancer listens on port 80 for HTTP requests.
+            DefaultActions=[Action(
+                Type='forward',
+                # TargetGroupARN is the connection between the ALB and the auto-scaling group
+                TargetGroupArn=Ref(target_group),
+            )]
+        ))
+
+        launch_config = t.add_resource(LaunchConfiguration(
+            "MyLaunchConfiguration",
+            ImageId=get_linux2_image_id(),
+            InstanceType='m4.xlarge',
+            KeyName=KEY,
+            SecurityGroups=[Ref(instance_sg)],
+            AssociatePublicIpAddress=True,
+            InstanceMonitoring=False,
+            UserData=Base64(Join('', [
+                '#!/bin/bash -xe\n',
+                '/opt/aws/bin/cfn-init -v --stack ', Ref('AWS::StackName'),
+                '                         --resource MyLaunchConfiguration ',
+                '                         --region ', Ref('AWS::Region'), '\n'
+            ])),
+            Metadata=Metadata(Init({
+                'config': InitConfig(
+                    packages={
+                        'yum': {'httpd': []}
+                    },
+                    files={
+                        '/tmp/config': {
+                            'content': Join('\n', [
+                                '#!/bin/bash -ex',
+                                'PRIVATE_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4`',
+                                'echo "$PRIVATE_IP" > index.html',
+                            ]),
+                            'mode': '000500',
+                            'owner': 'root',
+                            'group': 'root',
+                        }
+                    },
+                    commands={
+                        '01_config': {
+                            'command': "/tmp/config",
+                            'cwd': '/var/www/html'
+                        }
+                    },
+                    services={
+                        'sysvinit': {
+                            'httpd': {
+                                'enabled': True,
+                                'ensureRunning': True
+                            }
+                        }
+                    }
+                )
+            }))
+        ))
+        auto_scaling_group = t.add_resource(AutoScalingGroup(
+            "MyAutoScalingGroup",
+            LaunchConfigurationName=Ref(launch_config),
+            DesiredCapacity=2,
+            MinSize=2,
+            MaxSize=2,
+            VPCZoneIdentifier=[get_subnet(index=0), get_subnet(index=1)],
+            TargetGroupARNs=[Ref(target_group)],  # Registers new EC2 instances with the default target group.
+            Tags=[
+                Tag("Name", test_stack_name, True)  # 'True' means: Attaches the same tags to the virtual machine started by this auto-scaling group
+            ]
+        ))
+
+        t.add_output([
+            Output(
+                "URL",
+                Value=Sub('http://${MyLoadBalancer.DNSName}')
+            ),
+        ])
+        dump_template(t, True)
+        create_stack(test_stack_name, t)
+        outputs = get_stack_outputs(test_stack_name)
+        lb_url = get_output_value(outputs, 'URL')
+        private_ips = set()
+        for i in range(10):
+            private_ips.add(run(f'curl {lb_url}', True))
+        self.assertEqual(len(private_ips), 2)
