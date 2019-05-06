@@ -15,8 +15,8 @@ def declare_exchange(channel, name, **kw_args):
     exchange.declare()
     return exchange
 
-def declare_queue(channel, name):
-    queue = rabbitpy.Queue(channel, name)
+def declare_queue(channel, name, **kw_args):
+    queue = rabbitpy.Queue(channel, name, **kw_args)
     queue.declare()
     return queue
 

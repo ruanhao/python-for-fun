@@ -5,6 +5,7 @@ import datetime
 import time
 import unittest
 import rabbitpy
+import random
 from rabbitmq_utils import *
 
 
@@ -65,3 +66,55 @@ class UnitTest(unittest.TestCase):
                 self.assertTrue(ack)
                 ack = message.publish(exchange, 'no-routing-key')
                 self.assertTrue(ack)  # although no route, still ack
+
+    def test_publishing_with_transaction(self):
+        with rabbitpy.Connection(URL) as connection:
+            with connection.channel() as channel:
+                tx = rabbitpy.Tx(channel)
+                # publisher sends a TX.Select RPC request to RabbitMQ, and Rab- bitMQ will respond with a TX.SelectOk response.
+                tx.select()
+                exchange = declare_exchange(channel, 'publish-with-transaction')
+                queue = declare_queue(channel, "test-transaction-queue")
+                origin_len = len(queue)
+                bind(queue, exchange, "my-routing-key")
+                now = str(datetime.datetime.now())
+                random_num = random.randint(1, 10)
+                for i in range(0, random_num):
+                    message = rabbitpy.Message(channel, f'{now}-{i}', properties())
+                    message.publish(exchange, 'my-routing-key')
+                self.assertEqual(len(queue), origin_len)  # message not enqueued yet
+                result = tx.commit()  # call tx.rollback() here if want to roll back
+                self.assertTrue(result)
+                time.sleep(1)
+                self.assertEqual(len(queue), origin_len + random_num)
+
+    def test_ha_queues(self):
+
+        with self.subTest("HA policy for all"):
+            with rabbitpy.Connection(URL) as connection:
+                with connection.channel() as channel:
+                    exchange = declare_exchange(channel, 'ha-policy-all-exchange')
+                    arguments = {'x-ha-policy': 'all'}
+                    queue = declare_queue(channel, '', arguments=arguments)
+
+        with self.subTest("HA policy for nodes"):
+            with rabbitpy.Connection(URL) as connection:
+                with connection.channel() as channel:
+                    exchange = declare_exchange(channel, 'ha-policy-nodes-exchange')
+                    arguments = {
+                        'x-ha-policy': 'nodes',
+                        'x-ha-nodes': ['rabbit@node1', 'rabbit@node2']  # node1 and node2 are not necessarily to be there
+                    }
+                    queue = declare_queue(channel, '', arguments=arguments)
+
+    def test_delivery_mode_2(self):
+        with rabbitpy.Connection(URL) as connection:
+            with connection.channel() as channel:
+                exchange = declare_exchange(channel, 'test-delivery-mode2-exchange')
+                queue = declare_queue(channel, "")
+                origin_len = len(queue)
+                bind(queue, exchange, "my-routing-key")
+                message = rabbitpy.Message(channel, 'test', {**properties(), 'delivery_mode': 2})
+                message.publish(exchange, 'my-routing-key')
+                time.sleep(1)
+                self.assertEqual(len(queue), origin_len + 1)
