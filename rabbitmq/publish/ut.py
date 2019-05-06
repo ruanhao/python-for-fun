@@ -45,10 +45,15 @@ class UnitTest(unittest.TestCase):
                                                 arguments={'alternate-exchange': alternate_exchange.name})
                     dlq = declare_queue(channel, 'unroutable-messages-queue')
                     bind(dlq, alternate_exchange, '#')
+                    origin_len = len(dlq)
                     body = 'test'
                     message = rabbitpy.Message(channel, body, properties('text/plain'))
                     message.publish(exchange, 'no-routing-key', mandatory=True)  # go to dlq
+                    time.sleep(1)
+                    self.assertEqual(len(dlq), origin_len + 1)
                     message.publish(exchange, 'no-routing-key')  # goto dlq
+                    time.sleep(1)
+                    self.assertEqual(len(dlq), origin_len + 2)
 
 
     def test_publisher_confirms(self):
