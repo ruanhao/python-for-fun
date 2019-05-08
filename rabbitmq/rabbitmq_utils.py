@@ -3,6 +3,8 @@
 
 import rabbitpy
 import datetime
+import requests
+import time
 
 def properties(content_type='application/json'):
     return {
@@ -22,3 +24,12 @@ def declare_queue(channel, name, **kw_args):
 
 def bind(queue, exchange, routing_key):
     queue.bind(exchange, routing_key)
+
+
+def get_channel(url):
+    return rabbitpy.Connection(url).channel()
+
+def get_unacked_number(queue_name):
+    time.sleep(10)               # wait for refresh
+    return requests.get(f'http://localhost:15672/api/queues/%2f/{queue_name}',
+                        auth=('guest', 'guest')).json()['messages_unacknowledged']
