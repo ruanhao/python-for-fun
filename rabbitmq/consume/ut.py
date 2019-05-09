@@ -205,3 +205,31 @@ class UnitTest(unittest.TestCase):
             msg.nack(False)
             dmsg = next(dlq.consume())
             self.assertEqual(msg.body.decode('utf-8'), 'test dlx routing message')
+
+    def test_queue_controlling(self):
+
+        with self.subTest("Temporary queues"):
+            channel = get_channel(URL)
+            queue = declare_queue(channel, "temporary-queue", auto_delete=True)
+            all_queues = get_all_queues()
+            the_queue = key_find(all_queues, 'name', queue.name)
+            self.assertTrue(the_queue['auto_delete'])
+            rabbitpy.publish(URL, "", queue.name, "hello world")
+            c = queue.consume()
+            msg = next(c)
+            msg.ack()
+            self.assertEqual(msg.body.decode('utf-8'), 'hello world')
+            queue.stop_consuming()  # removes the queue once the consuming is stopped
+            self.assertIsNone(key_find(get_all_queues(), 'name', queue.name))
+
+
+        with self.subTest("Allowing only a single consumer"):
+            connection = rabbitpy.Connection(URL)
+            channel = connection.channel()
+            queue = declare_queue(channel, "exclusive-queue", exclusive=True)
+            self.assertTrue(key_find(get_all_queues(), 'name', queue.name)['exclusive'])
+            channel.close()
+            self.assertIsNotNone(key_find(get_all_queues(), 'name', queue.name))
+            connection.close()
+            # enabling exclusive queues automatically removes the queue once the connection is down
+            self.assertIsNone(key_find(get_all_queues(), 'name', queue.name))

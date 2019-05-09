@@ -6,6 +6,9 @@ import datetime
 import requests
 import time
 
+def key_find(lst, key, value):
+    return next((item for item in lst if item[key] == value), None)
+
 def properties(content_type='application/json'):
     return {
         'content_type': content_type,
@@ -33,3 +36,6 @@ def get_unacked_number(queue_name):
     time.sleep(10)               # wait for refresh
     return requests.get(f'http://localhost:15672/api/queues/%2f/{queue_name}',
                         auth=('guest', 'guest')).json()['messages_unacknowledged']
+
+def get_all_queues():
+    return requests.get(f'http://localhost:15672/api/queues/', auth=('guest', 'guest')).json()
