@@ -140,3 +140,68 @@ class UnitTest(unittest.TestCase):
             msg = next(consumer)
         msg.ack(all_previous=True)
         self.assertEqual(get_unacked_number(queue.name), 1 + origin_len)
+
+    def test_reject_msg_by_nack(self):
+        channel = get_channel(URL)
+        exchange = declare_exchange(channel, 'test-nack-msgs-exchange')
+        queue = declare_queue(channel, "test-nack-msgs-queue")
+        bind(queue, exchange, "my-routing-key")
+        queue.purge()
+        random_count = random.randint(5, 10)
+        for i in range(0, random_count):
+            message = rabbitpy.Message(channel, f'test maeesge-{i}', properties())
+            message.publish(exchange, 'my-routing-key')
+        consumer = queue.consume()
+        msg0 = next(consumer)
+        self.assertEqual(get_unacked_number(queue.name), random_count)
+        msg0.nack(False)         # reject
+        self.assertEqual(get_unacked_number(queue.name), random_count - 1)
+        msg1 = next(consumer)
+        msg1.nack(True)         # requeue
+        requeued_msg_body = msg1.body.decode('utf-8')
+        self.assertEqual(get_unacked_number(queue.name), random_count - 1)
+        _msg2 = next(consumer)
+        msg3 = next(consumer)
+        msg3.nack(requeue=False, all_previous=True)
+        self.assertEqual(get_unacked_number(queue.name), random_count - 1 - 2)  # _msg2 and msg3 are unacked
+        for m in consumer:
+            if m.body.decode('utf-8') == requeued_msg_body:
+                self.assertTrue(m.redelivered)
+                break
+            else:
+                self.assertFalse(m.redelivered)
+
+    def test_using_dead_letter_exchange(self):
+        channel = get_channel(URL)
+        exchange = declare_exchange(channel, 'test-dlx-normal-exchange', exchange_type='topic')
+
+        with self.subTest("Using x-dead-letter-exchange argument"):
+            dlx = declare_exchange(channel, 'test-dlx-exchange')
+            dlq = declare_queue(channel, "test-dlx-dlq")
+            bind(dlq, dlx, "my-routing-key")
+            dlq.purge()
+            queue = declare_queue(channel, "test-dlx-normal-queue", dead_letter_exchange=dlx.name)
+            bind(queue, exchange, "my-routing-key")
+            queue.purge()
+            ###
+            message = rabbitpy.Message(channel, 'test dlx message', properties())
+            message.publish(exchange, 'my-routing-key')
+            msg = next(queue.consume())
+            msg.nack(False)
+            dmsg = next(dlq.consume())
+            self.assertEqual(msg.body.decode('utf-8'), 'test dlx message')
+
+        with self.subTest("Using x-dead-letter-routing-key argument"):
+            queue = declare_queue(channel, "test-dlx-routing-queue",
+                                  dead_letter_exchange=exchange.name,  # have to specify dead_letter_exchange along with dead_letter_routing_key
+                                  dead_letter_routing_key="dl-routing-key")
+            bind(queue, exchange, "normal-routing-key")
+            queue.purge()
+            dlq = declare_queue(channel, "test-dlx-routing-dlq")
+            bind(dlq, exchange, "dl-routing-key")
+            dlq.purge()
+            rabbitpy.Message(channel, 'test dlx routing message', properties()).publish(exchange, 'normal-routing-key')
+            msg = next(queue.consume())
+            msg.nack(False)
+            dmsg = next(dlq.consume())
+            self.assertEqual(msg.body.decode('utf-8'), 'test dlx routing message')
