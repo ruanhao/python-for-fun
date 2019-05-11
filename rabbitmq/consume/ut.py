@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import warnings
 import threading
 import datetime
 import time
@@ -13,6 +14,9 @@ from rabbitmq_utils import *
 URL = 'amqp://guest:guest@localhost:5672/'
 
 class UnitTest(unittest.TestCase):
+
+    def setUp(self):
+        warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed.*")
 
 
     def test_handy_publishing_and_consuming(self):
@@ -209,27 +213,122 @@ class UnitTest(unittest.TestCase):
     def test_queue_controlling(self):
 
         with self.subTest("Temporary queues"):
-            channel = get_channel(URL)
-            queue = declare_queue(channel, "temporary-queue", auto_delete=True)
-            all_queues = get_all_queues()
-            the_queue = key_find(all_queues, 'name', queue.name)
+            channel = pika_channel()
+            queue = pika_queue_declare(channel, "temporary-queue", auto_delete=True)
+
+            the_queue = key_find(all_queues(), 'name', queue)
             self.assertTrue(the_queue['auto_delete'])
-            rabbitpy.publish(URL, "", queue.name, "hello world")
-            c = queue.consume()
-            msg = next(c)
-            msg.ack()
-            self.assertEqual(msg.body.decode('utf-8'), 'hello world')
-            queue.stop_consuming()  # removes the queue once the consuming is stopped
-            self.assertIsNone(key_find(get_all_queues(), 'name', queue.name))
+
+            consumer_tag = pika_consume(channel, queue, pika_simple_callback)
+            channel.stop_consuming(consumer_tag)  # removes the queue once the consuming is stopped
+            self.assertIsNone(key_find(get_all_queues(), 'name', queue))
 
 
         with self.subTest("Allowing only a single consumer"):
-            connection = rabbitpy.Connection(URL)
-            channel = connection.channel()
-            queue = declare_queue(channel, "exclusive-queue", exclusive=True)
-            self.assertTrue(key_find(get_all_queues(), 'name', queue.name)['exclusive'])
-            channel.close()
-            self.assertIsNotNone(key_find(get_all_queues(), 'name', queue.name))
+            channel = pika_channel()
+            queue = pika_queue_declare(channel, "exclusive-queue", exclusive=True)
+            self.assertTrue(key_find(all_queues(), 'name', queue)['exclusive'])
+
+            consumer_tag = pika_consume(channel, queue, pika_simple_callback)
+            channel.stop_consuming(consumer_tag)
+            # Can consume and cancel the consumer for an exclusive queue as many times as you like
+            self.assertIsNotNone(key_find(all_queues(), 'name', queue))
+
+            pika_consume(channel, queue, pika_simple_callback)
+            channel_on_same_conn = channel.connection.channel()
+            # It is ok to add new consumer on the same connection
+            pika_consume(channel_on_same_conn, queue, pika_simple_callback)
+
+            channel_on_other_conn = pika_channel()
+            # A queue that's declared as exclusive can not be consumed by other connection
+            with self.assertRaises(pika.exceptions.ChannelClosedByBroker) as ex:
+                pika_consume(channel_on_other_conn, queue, pika_simple_callback)
+            self.assertIn('RESOURCE_LOCKED', ex.exception.reply_text)
+
+            connection = channel.connection
+            self.assertIsNotNone(key_find(all_queues(), 'name', queue))
             connection.close()
-            # enabling exclusive queues automatically removes the queue once the connection is down
-            self.assertIsNone(key_find(get_all_queues(), 'name', queue.name))
+            # Enabling exclusive queues automatically removes the queue once the connection is down
+            self.assertIsNone(key_find(all_queues(), 'name', queue))
+
+
+        with self.subTest("Automatically expiring queues"):
+            channel = pika_channel()
+            queue = pika_queue_declare(channel, 'expiring-queue', arguments={'x-expires': 3000})  # in milliseconds
+            self.assertIsNotNone(key_find(all_queues(), 'name', queue))
+            time.sleep(3)
+            self.assertIsNone(key_find(all_queues(), 'name', queue))
+
+            queue = pika_queue_declare(channel, 'expiring-queue', arguments={'x-expires': 1000})  # in milliseconds
+            pika_consume(channel, queue, pika_simple_callback)
+            time.sleep(2)
+            # The queue will only expire if it has no consumers.
+            self.assertIsNotNone(key_find(all_queues(), 'name', queue))
+
+        with self.subTest("Queue durability"):
+            channel = pika_channel()
+            queue = pika_queue_declare(channel, 'durable-queue', durable=True)
+            self.assertTrue(key_find(all_queues(), 'name', queue)['durable'])
+
+
+        with self.subTest('Auto-expiration of messages in a queue'):
+            channel = pika_channel()
+            queue = pika_queue_declare(channel, 'expiring-msg-queue', arguments={'x-message-ttl': 2000})
+            channel.queue_purge(queue)
+            now = str(datetime.datetime.now())
+            pika_simple_publish(channel, queue, now)
+            time.sleep(1)
+            _, msg_counter = pika_queue_counters(channel, queue)
+            self.assertEqual(msg_counter, 1)
+            time.sleep(2)
+            _, msg_counter = pika_queue_counters(channel, queue)
+            self.assertEqual(msg_counter, 0)
+
+
+            # Queues declared with BOTH a dead-letter exchange and a TTL value will result in
+            # the dead-lettering of messages in the queue at time of expiration.
+            dlx = pika_exchange_declare(channel, "expiring-msg-dlx")
+            dlq = pika_queue_declare(channel, "expiring-msg-dlq")
+            normal_exchange = pika_exchange_declare(channel, "expiring-msg-normal-exchange")
+            queue2 = pika_queue_declare(channel, 'expiring-msg-dlx-queue',
+                                       arguments={
+                                           'x-message-ttl': 1000,
+                                           'x-dead-letter-exchange': dlx,
+                                       }
+            )
+            pika_queue_bind(channel, dlq, dlx, queue2)
+            channel.queue_purge(dlq)
+            channel.queue_purge(queue2)
+            now = str(datetime.datetime.now())
+            pika_simple_publish(channel, queue2, now)
+            time.sleep(1)
+            _method_frame, _header_frame, body = channel.basic_get(dlq)
+            self.assertEqual(body.decode('utf-8'), now)
+
+        with self.subTest("Maximum length queues"):
+            channel = pika_channel()
+
+            dlx = pika_exchange_declare(channel, "max-length-msg-dlx")
+            dlq = pika_queue_declare(channel, "max-length-msg-dlq")
+            normal_exchange = pika_exchange_declare(channel, "max-length-msg-normal-exchange")
+            queue = pika_queue_declare(channel, 'max-length-msg-queue',
+                                       arguments={
+                                           'x-max-length': 5,
+                                           'x-dead-letter-exchange': dlx,
+                                       })
+            channel.queue_purge(dlq)
+            channel.queue_purge(queue)
+            pika_queue_bind(channel, dlq, dlx, queue)
+
+            for i in range(0, 6):  # publish msg0, msg1, ..., msg5
+                pika_simple_publish(channel, queue, f'msg{i}')
+
+            time.sleep(1)
+            _, msg_counter = pika_queue_counters(channel, queue)
+            self.assertEqual(msg_counter, 5)
+            _method_frame, _header_frame, body = channel.basic_get(queue)
+            # RabbitMQ will drop messages from the front of the queue as new messages are added.
+            self.assertEqual(body.decode('utf-8'), 'msg1')
+            _method_frame, _header_frame, body = channel.basic_get(dlq)
+            # Messages that are removed from the front of the queue can be dead-lettered if the queue is declared with a dead-letter exchange.
+            self.assertEqual(body.decode('utf-8'), 'msg0')
