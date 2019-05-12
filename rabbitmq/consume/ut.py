@@ -276,7 +276,7 @@ class UnitTest(unittest.TestCase):
             queue = pika_queue_declare(channel, 'expiring-msg-queue', arguments={'x-message-ttl': 2000})
             channel.queue_purge(queue)
             now = str(datetime.datetime.now())
-            pika_simple_publish(channel, queue, now)
+            pika_simple_publish(channel, '', queue, now)
             time.sleep(1)
             _, msg_counter = pika_queue_counters(channel, queue)
             self.assertEqual(msg_counter, 1)
@@ -300,7 +300,7 @@ class UnitTest(unittest.TestCase):
             channel.queue_purge(dlq)
             channel.queue_purge(queue2)
             now = str(datetime.datetime.now())
-            pika_simple_publish(channel, queue2, now)
+            pika_simple_publish(channel, '', queue2, now)
             time.sleep(1)
             _method_frame, _header_frame, body = channel.basic_get(dlq)
             self.assertEqual(body.decode('utf-8'), now)
@@ -321,7 +321,7 @@ class UnitTest(unittest.TestCase):
             pika_queue_bind(channel, dlq, dlx, queue)
 
             for i in range(0, 6):  # publish msg0, msg1, ..., msg5
-                pika_simple_publish(channel, queue, f'msg{i}')
+                pika_simple_publish(channel, '', queue, f'msg{i}')
 
             time.sleep(1)
             _, msg_counter = pika_queue_counters(channel, queue)
