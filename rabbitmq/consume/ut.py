@@ -19,42 +19,33 @@ class UnitTest(unittest.TestCase):
         warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed.*")
 
 
-    def test_handy_publishing_and_consuming(self):
-        '''
-        Usage of default exchange
-        '''
-        with rabbitpy.Connection(URL) as connection:
-            with connection.channel() as channel:
-                queue = declare_queue(channel, '', auto_delete=True)
+    def test_manually_ack(self):
+        channel = pika_channel()
+        channel.basic_qos(prefetch_count=10)  # not be flooded with too many msg
+        queue = pika_queue_declare(channel, 'test-ack-queue')
 
-        routing_key_as_queue_name = queue.name
-        # The empty string denotes the default nameless exchange:
-        # messages are routed to the queue with the name SPECIFIED BY routing_key, if it exists.
-        rabbitpy.publish(URL, '', routing_key_as_queue_name, 'hello world')
+        def cb(c, m, p, b):
+            print(f'Receive {b}')
+            dt = m.delivery_tag
+            c.basic_ack(dt)
 
-        for message in rabbitpy.consume(URL, queue.name):
-            message.pprint()
-            message.ack()
-            break
+        pika_consume(channel, queue, cb)
+        pika_queue_declare(channel, 'another-queue')
 
-    def test_ack_mode(self):
-        channel = get_channel(URL)
-        exchange = declare_exchange(channel, 'test-ack-mode-exchange')
-        queue = declare_queue(channel, "test-ack-mode-queue")
-        origin_len = len(queue)
-        bind(queue, exchange, "my-routing-key")
-        random_num = random.randint(1, 5)
-        print(f'random number of msgs: {random_num}, origin_len: {origin_len}')
-        for i in range(0, random_num):
-            message = rabbitpy.Message(channel, f'test ack maeesge-{i}', properties())
-            message.publish(exchange, 'my-routing-key')
-        time.sleep(1)
-        self.assertEqual(len(queue), random_num + origin_len)
-        consumer = queue.consume(no_ack=False)
-        time.sleep(1)
-        next(consumer)          # start generator (read all messages)
-        self.assertEqual(len(queue), 0)
-        self.assertEqual(get_unacked_number(queue.name), random_num + origin_len)
+        for i in range(0, 5):
+            pika_simple_publish(channel, '', queue, f'msg{i}')
+
+        def worker():
+            nonlocal channel
+            print('Start consuming')
+            channel.start_consuming()
+
+        t = threading.Thread(target=worker, name='Worker')
+        t.setDaemon(True)
+        t.start()
+
+        self.assertEqual(get_unacked_number(queue), 0)
+
 
     def test_no_ack_mode(self):
         channel = get_channel(URL)
