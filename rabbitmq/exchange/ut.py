@@ -25,7 +25,7 @@ class UnitTest(unittest.TestCase):
                             `----- qa -----> test-direct-exchange-queue2
                             `---- test ----> test-direct-exchange-queue3
         '''
-        channel = pika_channel()
+        channel = pika_channel(vhost='test-direct-exchange')
         exchange = pika_exchange_declare(channel, "test-direct-exchange", exchange_type='direct')
         queue1 = pika_queue_declare(channel, "test-direct-exchange-queue1")
         queue2 = pika_queue_declare(channel, "test-direct-exchange-queue2")
@@ -48,7 +48,7 @@ class UnitTest(unittest.TestCase):
 
 
     def test_fanout_exchange(self):
-        channel = pika_channel()
+        channel = pika_channel(vhost='test-fanout-exchange')
         exchange = pika_exchange_declare(channel, "test-fanout-exchange", exchange_type='fanout')
         queue1 = pika_queue_declare(channel, "test-fanout-exchange-queue1")
         queue2 = pika_queue_declare(channel, "test-fanout-exchange-queue2")
@@ -68,7 +68,7 @@ class UnitTest(unittest.TestCase):
                 `-- #.software --> queue2
                 `-- *.dev.*    --> queue3
         '''
-        channel = pika_channel()
+        channel = pika_channel(vhost='test-topic-exchange')
         exchange = pika_exchange_declare(channel, "test-topic-exchange", exchange_type='topic')
         queue1 = pika_queue_declare(channel, "test-topic-exchange-queue1")
         queue2 = pika_queue_declare(channel, "test-topic-exchange-queue2")
@@ -100,7 +100,7 @@ class UnitTest(unittest.TestCase):
         exchange -- {'x-match': 'all', 'env': 'dev', 'severity': 'info'} --> all_match_queue
                 `-- {'x-match': 'any', 'env': 'dev', 'severity': 'normal'} --> any_match_queue
         '''
-        channel = pika_channel()
+        channel = pika_channel(vhost='test-headers-exchange')
         exchange = pika_exchange_declare(channel, "test-header-exchange", exchange_type='headers')
         all_match_queue = pika_queue_declare(channel, "test-header-exchange-all-match-queue")
         any_match_queue = pika_queue_declare(channel, "test-header-exchange-any-match-queue")
@@ -148,7 +148,7 @@ class UnitTest(unittest.TestCase):
            \
             `--a.c.#--> queue1
         '''
-        channel = pika_channel()
+        channel = pika_channel(vhost='test-exchange-exchange-routing')
         exchange1 = pika_exchange_declare(channel, "test-x2x-routing-exchange1", exchange_type='topic')
         exchange2 = pika_exchange_declare(channel, "test-x2x-routing-exchange2", exchange_type='topic')
         queue1 = pika_queue_declare(channel, 'test-x2x-routing-queue1')
@@ -190,7 +190,7 @@ class UnitTest(unittest.TestCase):
                `---30--> consistent-hash-queue3
         '''
         run("docker exec -it rabbit rabbitmq-plugins enable rabbitmq_consistent_hash_exchange", True)
-        channel = pika_channel()
+        channel = pika_channel(vhost='test-consistent-hashing-exchange')
         exchange = pika_exchange_declare(channel, "test-consitent-hashing-exchange", exchange_type='x-consistent-hash')
         queues = [f'consistent-hash-queue{i}' for i in range(1, 4)]
         for i, q in enumerate(queues, 1):

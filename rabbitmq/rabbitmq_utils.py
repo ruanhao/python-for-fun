@@ -47,12 +47,25 @@ def all_queues():
     return get_all_queues()
 
 
+def create_vhost(vhost):
+    data = requests.get('http://localhost:15672/api/vhosts', auth=('guest', 'guest')).json()
+    vhosts = [v['name'] for v in data]
+    if vhost in vhosts:
+        return
+    resp = requests.put(f'http://localhost:15672/api/vhosts/{vhost}', auth=('guest', 'guest'))
+    assert resp.ok is True
 
-def pika_connection(host='localhost'):
-    return pika.BlockingConnection(pika.ConnectionParameters(host='localhost'))
 
-def pika_channel(host='localhost'):
-    return pika_connection(host).channel()
+
+def pika_connection(host='localhost', vhost='/'):
+    create_vhost(vhost)
+    return pika.BlockingConnection(pika.ConnectionParameters(
+        host='localhost',
+        virtual_host=vhost,
+    ))
+
+def pika_channel(host='localhost', vhost='/'):
+    return pika_connection(host=host, vhost=vhost).channel()
 
 def pika_queue_purge(channel, queue):
     if isinstance(queue, list):
