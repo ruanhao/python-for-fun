@@ -8,6 +8,11 @@ import time
 import pika
 import subprocess
 import sys
+import uuid
+
+def get_uuid():
+    str(uuid.uuid4())
+
 
 def key_find(lst, key, value):
     return next((item for item in lst if item[key] == value), None)
@@ -47,8 +52,8 @@ def all_queues():
     return get_all_queues()
 
 
-def create_vhost(vhost):
-    data = requests.get('http://localhost:15672/api/vhosts', auth=('guest', 'guest')).json()
+def create_vhost(vhost, port=15672):
+    data = requests.get(f'http://localhost:{port}/api/vhosts', auth=('guest', 'guest')).json()
     vhosts = [v['name'] for v in data]
     if vhost in vhosts:
         return
@@ -57,15 +62,16 @@ def create_vhost(vhost):
 
 
 
-def pika_connection(host='localhost', vhost='/'):
-    create_vhost(vhost)
+def pika_connection(host='localhost', port=5672, vhost='/'):
+    create_vhost(vhost, port=10000+port)
     return pika.BlockingConnection(pika.ConnectionParameters(
         host='localhost',
+        port=port,
         virtual_host=vhost,
     ))
 
-def pika_channel(host='localhost', vhost='/'):
-    return pika_connection(host=host, vhost=vhost).channel()
+def pika_channel(host='localhost', port=5672, vhost='/'):
+    return pika_connection(host=host, port=port, vhost=vhost).channel()
 
 def pika_queue_purge(channel, queue):
     if isinstance(queue, list):
@@ -132,6 +138,7 @@ def utf8(encoded):
     return encoded.decode('utf-8')
 
 def pika_basic_get(channel, queue):
+    time.sleep(0.1)
     method_frame, _header_frame, body = channel.basic_get(queue)
     if method_frame:
         decoded = utf8(body)
@@ -153,5 +160,30 @@ def run(script, quiet=False):
         print(f'{stdout_str}')
         print(f'{stderr_str}', file=sys.stderr)
         if proc.returncode:
-            raise Exception('Exit Code: %s' % proc.returncode)
+            e = Exception()
+            e.err_code = proc.returncode
+            e.err_msg = stderr_str
+            raise e
     return stdout_str
+
+def get_running_nodes(management_port=15672):
+    url = f'http://localhost:{management_port}/api/nodes'
+    nodes = requests.get(url, auth=('guest', 'guest')).json()
+    results = []
+    for node in nodes:
+        if node['running'] is True:
+            results.append(node['name'])
+    return results
+
+def get_running_nodes_types(management_port=15672):
+    url = f'http://localhost:{management_port}/api/nodes'
+    nodes = requests.get(url, auth=('guest', 'guest')).json()
+    ram = 0
+    disc = 0
+    for node in nodes:
+        if node['running'] is True:
+            if node['type'] == 'ram':
+                ram += 1
+            if node['type'] == 'disc':
+                disc += 1
+    return disc, ram
