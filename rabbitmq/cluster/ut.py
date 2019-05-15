@@ -14,6 +14,13 @@ from rabbitmq_utils import *
 DOCKER_NETWORK = 'rabbitmq-cluster'
 BASIC_DOCKER_OPTS = f'--rm -d --network {DOCKER_NETWORK} -e RABBITMQ_ERLANG_COOKIE=mycookie -e RABBITMQ_NODENAME=rabbit'
 NODE_NUMBER = 3
+RABBIT_1_PORT = 5672
+RABBIT_2_PORT = 5673
+RABBIT_3_PORT = 5674
+RABBIT_1_MANAGEMENT_PORT = RABBIT_1_PORT + 10000
+RABBIT_2_MANAGEMENT_PORT = RABBIT_2_PORT + 10000
+RABBIT_3_MANAGEMENT_PORT = RABBIT_3_PORT + 10000
+
 
 class UnitTest(unittest.TestCase):
 
@@ -83,28 +90,49 @@ class UnitTest(unittest.TestCase):
             self.assertIn('rabbit@rabbit4', get_running_nodes())
 
 
-        with self.subTest("Pulling out all disc nodes normally"):
+        with self.subTest("Pulling out one disc node abruptly"):
             self.test_creating_cluster()
-            channel_at_rabbit2 = pika_channel(port=5673)
+            run('docker stop rabbit2')
+            run('docker exec rabbit1 rabbitmqctl cluster_status')
+            self._test_basic_functions() # ok
+            self._test_adding_new_node(i=4) # ok
+            run(f'docker exec rabbit1 rabbitmqctl await_online_nodes 3')
+            self.assertIn('rabbit@rabbit4', get_running_nodes())
+            run('docker exec rabbit1 rabbitmqctl cluster_status')
+
+        with self.subTest("Pulling out all disc nodes normally"):
+            '''
+            Pull out rabbit1 and rabbit2
+            rabbit3 untouched
+            '''
+            self.test_creating_cluster()
+            channel_at_rabbit2 = pika_channel(port=RABBIT_2_PORT)
+            channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)
             queue_at_rabbit2 = pika_queue_declare(channel_at_rabbit2, '')
+            queue_at_rabbit3 = pika_queue_declare(channel_at_rabbit3, '')
             pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit2, 'hello')
-            channel_at_rabbit3 = pika_channel(port=5674)
+
             self.assertEqual(pika_basic_get(channel_at_rabbit3, queue_at_rabbit2), 'hello')
+            pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit3, "message sent before")
+
 
             run('docker exec rabbit1 rabbitmqctl stop_app')
             run('docker exec rabbit1 rabbitmqctl reset')  # reset disc node rabbit@rabbit1
             run('docker exec rabbit2 rabbitmqctl stop_app')
-            self.assertEqual(get_running_nodes_types(15674), (0, 1))
+            self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (0, 1))
 
-            another_channel_at_rabbit3 = pika_channel(port=5674)  # still can connect to cluster
+            another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
+            # can retrieve msg sent before
+            self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
             with self.assertRaises(pika.exceptions.ChannelClosedByBroker) as raised_exception:
                 pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit2)
             self.assertIn(f"no queue '{queue_at_rabbit2}'", raised_exception.exception.reply_text)  # queue not available
             self.assertEqual(raised_exception.exception.reply_code, 404)
 
-            self._test_basic_functions(port=5674)
+
+            self._test_basic_functions(port=RABBIT_3_PORT)
             self._test_adding_new_node(i=4, target_node='rabbit@rabbit3')  # ok to add ram node
-            self.assertEqual(get_running_nodes_types(15674), (0, 2))
+            self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (0, 2))
 
             with self.assertRaises(Exception) as raised_exception:
                 self._test_adding_new_node(i=5, target_node='rabbit@rabbit2')
@@ -116,15 +144,33 @@ class UnitTest(unittest.TestCase):
             self.assertIn('cannot reset a node when it is the only disc node in a cluster', raised_exception.exception.err_msg)
 
             self._test_adding_new_node(i=6, target_node='rabbit@rabbit3', node_type='disc') # ok to add disc node
-            self.assertEqual(get_running_nodes_types(15674), (1, 2))
+            self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (1, 2))
 
 
-        with self.subTest("Pulling out one disc node abruptly"):
+        with self.subTest("Pulling out all disc nodes abruptly"):
+            '''
+            Pull out rabbit1 and rabbit2
+            rabbit3 untouched
+            '''
             self.test_creating_cluster()
+            channel_at_rabbit2 = pika_channel(port=RABBIT_2_PORT)
+            channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)
+            queue_at_rabbit2 = pika_queue_declare(channel_at_rabbit2, '')
+            queue_at_rabbit3 = pika_queue_declare(channel_at_rabbit3, '')
+            pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit2, 'hello')
+            self.assertEqual(pika_basic_get(channel_at_rabbit3, queue_at_rabbit2), 'hello')
+            pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit3, "message sent before")
+
+            run('docker stop rabbit1')
+            self._test_basic_functions(port=RABBIT_3_PORT)
+            self._test_adding_new_node(i=4, target_node='rabbit@rabbit3')  # ok to add ram node
+            self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (1, 2))
+
             run('docker stop rabbit2')
-            run('docker exec rabbit1 rabbitmqctl cluster_status')
-            self._test_basic_functions() # ok
-            self._test_adding_new_node(i=4) # ok
-            run(f'docker exec rabbit1 rabbitmqctl await_online_nodes 3')
-            self.assertIn('rabbit@rabbit4', get_running_nodes())
-            run('docker exec rabbit1 rabbitmqctl cluster_status')
+            self._test_basic_functions(port=RABBIT_3_PORT)
+            self._test_adding_new_node(i=5, target_node='rabbit@rabbit3')  # ok to add ram node
+            self._test_adding_new_node(i=6, target_node='rabbit@rabbit3', node_type='disc')  # ok to add ram node
+            self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (1, 3))
+
+            another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
+            self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
