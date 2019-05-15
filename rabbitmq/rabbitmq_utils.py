@@ -11,7 +11,7 @@ import sys
 import uuid
 
 def get_uuid():
-    str(uuid.uuid4())
+    return str(uuid.uuid4())
 
 
 def key_find(lst, key, value):
@@ -164,7 +164,13 @@ def run(script, quiet=False):
             e.err_code = proc.returncode
             e.err_msg = stderr_str
             raise e
-    return stdout_str
+    return stdout_str, stderr_str
+
+def get_nodes(management_port=15672):
+    url = f'http://localhost:{management_port}/api/nodes'
+    nodes = requests.get(url, auth=('guest', 'guest')).json()
+    return nodes
+
 
 def get_running_nodes(management_port=15672):
     url = f'http://localhost:{management_port}/api/nodes'

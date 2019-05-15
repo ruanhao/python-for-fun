@@ -76,6 +76,22 @@ class UnitTest(unittest.TestCase):
         run('docker exec rabbit1 rabbitmqctl cluster_status')
 
 
+    def test_reset(self):
+        self.test_creating_cluster()
+        run('docker stop rabbit1 rabbit2')
+        run('docker exec rabbit3 rabbitmqctl stop_app')
+        _, stderr = run('docker exec rabbit3 rabbitmqctl reset', True)
+        self.assertIn('cannot_create_standalone_ram_node', stderr)
+        run('docker exec rabbit3 rabbitmqctl force_reset')
+
+        self.test_creating_cluster()
+        run('docker stop rabbit2 rabbit3')
+        run('docker exec rabbit1 rabbitmqctl stop_app')
+        _, stderr = run('docker exec rabbit1 rabbitmqctl reset', True)
+        self.assertIn('You cannot leave a cluster if no online nodes are present', stderr)
+        run('docker exec rabbit1 rabbitmqctl force_reset')
+
+
     def test_pulling_out_disc_node_from_cluster(self):
         with self.subTest("Pulling out one disc node normally"):
             self.test_creating_cluster()
@@ -174,3 +190,87 @@ class UnitTest(unittest.TestCase):
 
             another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
             self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
+
+    def test_update_cluster_nodes(self):
+        '''
+        在集群中的节点应用启动前先咨询 clusternode 节点的最新信息，井更新相应的集群信息。 这个和 join_cluster 不同，它不加入集群。
+        考虑这样一种情况，节点 A 和节点 B 在集群中，当节点 A 离线，节点 C 又和节点 B 组成了一个集群，然后节点 B 又离开了集群，
+        当 A 醒来的时候，它会尝试联系节点 B，但是这样会失败， 因为节点 B 己经不在集群中了。
+        Rabbitmqctl update_cluster_nodes C 可以解决这种场景下出现的问题。
+        '''
+        run('docker stop `docker ps --format="{{.Names}}" | grep rabbit`', True)
+        run(f'docker network rm {DOCKER_NETWORK}', True)
+        run(f'docker network create {DOCKER_NETWORK}')
+
+        # rabbit_a
+        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_a --name rabbit_a -p 15672:15672 -p 5672:5672 rabbitmq:3-management')
+        run('docker exec rabbit_a rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
+
+        # rabbit_b
+        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_b --name rabbit_b -p 15673:15672 -p 5673:5672 rabbitmq:3-management')
+        run('docker exec rabbit_b rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
+        run('docker exec rabbit_b rabbitmqctl stop_app')
+        run('docker exec rabbit_b rabbitmqctl reset')
+        run('docker exec rabbit_b rabbitmqctl join_cluster --ram rabbit@rabbit_a')
+        run('docker exec rabbit_b rabbitmqctl start_app')
+        self.assertEqual(get_running_nodes_types(), (1, 1))
+
+        run('docker exec rabbit_a rabbitmqctl stop_app')  # rabbit_a offline
+
+        # rabbit_c
+        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_c --name rabbit_c -p 15674:15672 -p 5674:5672 rabbitmq:3-management')
+        run('docker exec rabbit_c rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
+        run('docker exec rabbit_c rabbitmqctl stop_app')
+        run('docker exec rabbit_c rabbitmqctl reset')
+        run('docker exec rabbit_c rabbitmqctl join_cluster --ram rabbit@rabbit_b')
+        run('docker exec rabbit_c rabbitmqctl start_app')
+        self.assertEqual(get_running_nodes_types(15673), (0, 2))
+
+        # rabbit_b walks away
+        run('docker exec rabbit_b rabbitmqctl stop_app')
+        run('docker exec rabbit_b rabbitmqctl reset')
+
+        # rabbit_a wakes up
+        run('docker exec rabbit_a rabbitmqctl start_app')
+        all_nodes = get_nodes()
+        rabbit_a = key_find(all_nodes, 'name', 'rabbit@rabbit_a')
+        self.assertTrue(rabbit_a['running'])
+        rabbit_b = key_find(all_nodes, 'name', 'rabbit@rabbit_b')
+        self.assertFalse(rabbit_b['running'])  # rabbit_b still there but not running
+        run('docker exec rabbit_a rabbitmqctl cluster_status')
+
+        run('docker exec rabbit_a rabbitmqctl stop_app')
+        run('docker exec rabbit_a rabbitmqctl update_cluster_nodes rabbit@rabbit_c')  # query cluster info from rabbit_c
+        run('docker exec rabbit_a rabbitmqctl start_app')
+        all_nodes = get_nodes()
+        rabbit_a = key_find(all_nodes, 'name', 'rabbit@rabbit_a')
+        self.assertTrue(rabbit_a['running'])
+        rabbit_b = key_find(all_nodes, 'name', 'rabbit@rabbit_b')
+        self.assertIsNone(rabbit_b)  # no rabbit_b
+        rabbit_c = key_find(all_nodes, 'name', 'rabbit@rabbit_c')
+        self.assertTrue(rabbit_c['running'])
+        run('docker exec rabbit_a rabbitmqctl cluster_status')
+
+
+    def test_force_boot(self):
+        '''
+        rabbitmqctl force_boot
+        确保节点可以启动，即使它不是最后一个关闭的节点。
+        通常情况下，当关闭整个 RabbitMQ 集群时，重启的第一个节点应该是最后关闭的节点，因为它可以看到其他节点所看不到的事情。
+        但是有时会有一些异常情况出现，比如整个集群都掉电而所有节点都认为它不是最后一个关闭的。
+        在这种情况下，可以调用 rabbitmqctl force_boot 命令，这就告诉节点可以无条件地启动节点。
+        如果最后一个关闭的节点永久丢失了，那么需要优先使用 rabbitmqctl forget_cluster_node --offline 命令，因为它可以确保镜像队列的正常运转。
+        '''
+        pass
+
+    def test_sync_queue(self):
+        '''
+        rabbitmqctl sync_queue
+        指示未同步队列 queue 的 slave 镜像可以同步 master 镜像的内容。
+        同步期间此队列会被阻塞(所有此队列的生产消费者都会被阻塞)，直到同步完成。
+        此条命令执行成功的前提是队列 queue 配置了镜像。
+        注意，未同步队列中的消息被耗尽后，最终也会变成同步，此命令主要用于未耗尽的队列。
+
+        可以使用 rabbitmqctl cancel_sync_queue 取消队列镜像同步的操作。
+        '''
+        pass
