@@ -8,6 +8,9 @@ import time
 import unittest
 import rabbitpy
 import random
+import os
+from subprocess import TimeoutExpired
+from contextlib import redirect_stderr, redirect_stdout
 from rabbitmq_utils import *
 
 
@@ -26,6 +29,8 @@ class UnitTest(unittest.TestCase):
 
     def setUp(self):
         warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed.*")
+
+
 
     def _test_basic_functions(self, port=5672):
         channel = pika_channel(port=port)
@@ -74,6 +79,12 @@ class UnitTest(unittest.TestCase):
 
         run(f'docker exec rabbit1 rabbitmqctl await_online_nodes {NODE_NUMBER}')
         run('docker exec rabbit1 rabbitmqctl cluster_status')
+
+    def _test_creating_cluster(self):
+        print("Creating cluster ...")
+        with open(os.devnull, 'w') as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                self.test_creating_cluster()
 
 
     def test_reset(self):
@@ -190,6 +201,50 @@ class UnitTest(unittest.TestCase):
 
             another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
             self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
+
+    def test_restarting_cluster_nodes(self):
+        # with self.subTest("Restarting ram node first"):
+        #     self._test_creating_cluster()
+        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+        #     for i in range(1, 4):
+        #         run(f"docker exec rabbit{i} rabbitmqctl stop_app")
+        #     with self.assertRaises(Exception):
+        #         run("docker exec rabbit3 rabbitmqctl start_app")  # Mnesia could not connect to any disc nodes
+
+        # with self.subTest("Restarting node (not last stopped disc)"):
+        #     self._test_creating_cluster()
+        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+        #     for i in range(1, 4):
+        #         run(f"docker exec rabbit{i} rabbitmqctl stop_app")
+
+        #     with self.assertRaises(TimeoutExpired):
+        #         # restart disc node that is not stopped last
+        #         run("docker exec rabbit1 rabbitmqctl start_app", timeout=30)  # Waiting for Mnesia tables
+
+        # with self.subTest("Restarting node (last stopped disc)"):
+        #     self._test_creating_cluster()
+        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+        #     for i in range(1, 4):
+        #         run(f"docker exec rabbit{i} rabbitmqctl stop_app")
+
+        #     # restart node that is stopped last as disc
+        #     run("docker exec rabbit2 rabbitmqctl start_app")
+        #     # the restarting sequence of rabbit1 and rabbit3 does not matter
+        #     run("docker exec rabbit1 rabbitmqctl start_app")
+        #     run("docker exec rabbit3 rabbitmqctl start_app")
+        #     self.assertEqual(get_running_nodes_types(), (2, 1))
+
+        with self.subTest("Restarting disc node first (first stopped)"):
+            self._test_creating_cluster()
+            self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+            for i in range(1, 4):
+                run(f"docker exec rabbit{i} rabbitmqctl stop_app")
+            run("docker exec rabbit3 rabbitmqctl force_boot")  # nok
+
+
+
+
+
 
     def test_update_cluster_nodes(self):
         '''

@@ -147,13 +147,13 @@ def pika_basic_get(channel, queue):
     else:
         return None
 
-def run(script, quiet=False):
+def run(script, quiet=False, timeout=60):
     if quiet is False:
         print(f"====== {script} ======")
     proc = subprocess.Popen(['bash', '-c', script],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.PIPE)
-    stdout, stderr = proc.communicate(timeout=60)
+    stdout, stderr = proc.communicate(timeout=timeout)
     stdout_str = stdout.decode('utf-8').rstrip('\n')
     stderr_str = stderr.decode('utf-8').rstrip('\n')
     if quiet is False:
