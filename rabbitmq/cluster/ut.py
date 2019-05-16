@@ -15,7 +15,7 @@ from rabbitmq_utils import *
 
 
 DOCKER_NETWORK = 'rabbitmq-cluster'
-BASIC_DOCKER_OPTS = f'--rm -d --network {DOCKER_NETWORK} -e RABBITMQ_ERLANG_COOKIE=mycookie -e RABBITMQ_NODENAME=rabbit'
+BASIC_DOCKER_OPTS = f'--rm -d --cap-add=NET_ADMIN --cap-add=NET_RAW --network {DOCKER_NETWORK} -e RABBITMQ_ERLANG_COOKIE=mycookie -e RABBITMQ_NODENAME=rabbit'
 NODE_NUMBER = 3
 RABBIT_1_PORT = 5672
 RABBIT_2_PORT = 5673
@@ -202,7 +202,7 @@ class UnitTest(unittest.TestCase):
             another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
             self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
 
-    def test_restarting_cluster_nodes(self):
+    def test_rejoining(self):
         # with self.subTest("Restarting ram node first"):
         #     self._test_creating_cluster()
         #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
@@ -220,6 +220,16 @@ class UnitTest(unittest.TestCase):
         #     with self.assertRaises(TimeoutExpired):
         #         # restart disc node that is not stopped last
         #         run("docker exec rabbit1 rabbitmqctl start_app", timeout=30)  # Waiting for Mnesia tables
+
+
+        #     run("docker exec rabbit2 rabbitmqctl start_app")
+        #     run("docker exec rabbit3 rabbitmqctl start_app")
+        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+
+
+
+
+
 
         # with self.subTest("Restarting node (last stopped disc)"):
         #     self._test_creating_cluster()
@@ -239,7 +249,27 @@ class UnitTest(unittest.TestCase):
             self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
             for i in range(1, 4):
                 run(f"docker exec rabbit{i} rabbitmqctl stop_app")
-            run("docker exec rabbit3 rabbitmqctl force_boot")  # nok
+
+
+            '''
+            通常情况下，当关闭整个 RabbitMQ 集群时，重启的第一个节点应该是最后关闭的节点，因为它可以看到其他节点所看不到的事情。
+            但是有时会有一些异常情况出现，比如整个集群都掉电而所有节点都认为它不是最后一个关闭的。
+            在这种情况下，可以调用 rabbitmqctl force_boot 命令，这就告诉节点*下次*可以无条件地启动节点。
+
+            如果最后一个关闭的节点永久丢失了，可以优先使用 rabbitmqctl forget_cluster_node 命令，因为它可以确保镜像队列的正常运转。
+            使用 forget_cluster_node 命令的话，需要删除的节点必须是 offline ，执行命令的节点必须 online ，（否则需要指定 --offline 参数）。
+            注意：如果指定执行命令的节点为 --offline ，意味着不能存在 Erlang node ，因为 rabbitmqctl 需要 mock 一个同名的 node 。
+            '''
+            run("docker exec rabbit1 rabbitmqctl force_boot")  # Ensures that the node will start NEXT TIME, even if it was not the last to shut down.
+            run("docker exec rabbit1 rabbitmqctl start_app")
+            run("docker exec rabbit2 rabbitmqctl start_app")
+            run("docker exec rabbit3 rabbitmqctl start_app")
+            self.assertEqual(get_running_nodes_types(), (2, 1))
+
+
+
+
+
 
 
 
@@ -306,17 +336,6 @@ class UnitTest(unittest.TestCase):
         self.assertTrue(rabbit_c['running'])
         run('docker exec rabbit_a rabbitmqctl cluster_status')
 
-
-    def test_force_boot(self):
-        '''
-        rabbitmqctl force_boot
-        确保节点可以启动，即使它不是最后一个关闭的节点。
-        通常情况下，当关闭整个 RabbitMQ 集群时，重启的第一个节点应该是最后关闭的节点，因为它可以看到其他节点所看不到的事情。
-        但是有时会有一些异常情况出现，比如整个集群都掉电而所有节点都认为它不是最后一个关闭的。
-        在这种情况下，可以调用 rabbitmqctl force_boot 命令，这就告诉节点可以无条件地启动节点。
-        如果最后一个关闭的节点永久丢失了，那么需要优先使用 rabbitmqctl forget_cluster_node --offline 命令，因为它可以确保镜像队列的正常运转。
-        '''
-        pass
 
     def test_sync_queue(self):
         '''
