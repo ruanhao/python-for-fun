@@ -11,9 +11,12 @@ import random
 import os
 from subprocess import TimeoutExpired
 from contextlib import redirect_stderr, redirect_stdout
+from troposphere import Output, Template, Ref, GetAtt
+from aws_utils import *
 from rabbitmq_utils import *
 
-
+SSH_OPTIONS = "-o StrictHostKeyChecking=no -o LogLevel=ERROR"
+RABBITMQ_VERSION = "3.7.14"
 DOCKER_NETWORK = 'rabbitmq-cluster'
 BASIC_DOCKER_OPTS = f'--rm -d --cap-add=NET_ADMIN --cap-add=NET_RAW --network {DOCKER_NETWORK} -e RABBITMQ_ERLANG_COOKIE=mycookie -e RABBITMQ_NODENAME=rabbit'
 NODE_NUMBER = 3
@@ -24,11 +27,13 @@ RABBIT_1_MANAGEMENT_PORT = RABBIT_1_PORT + 10000
 RABBIT_2_MANAGEMENT_PORT = RABBIT_2_PORT + 10000
 RABBIT_3_MANAGEMENT_PORT = RABBIT_3_PORT + 10000
 
+IMAGE_ID = 'ami-091b408e76a06ce1c'  # this image is located in Ohio
 
 class UnitTest(unittest.TestCase):
 
     def setUp(self):
         warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed.*")
+        warnings.filterwarnings("ignore", category=ResourceWarning, message="subprocess.*")
 
 
 
@@ -42,7 +47,7 @@ class UnitTest(unittest.TestCase):
 
 
     def _test_adding_new_node(self, i, target_node='rabbit@rabbit1', node_type='ram'):
-        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit{i} --name rabbit{i} -p {15672+i-1}:15672 -p {5672+i-1}:5672 rabbitmq:3-management')
+        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit{i} --name rabbit{i} -p {15672+i-1}:15672 -p {5672+i-1}:5672 rabbitmq:{RABBITMQ_VERSION}-management')
         run(f'docker exec rabbit{i} rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
 
         run(f'docker exec rabbit{i} rabbitmqctl stop_app')
@@ -62,7 +67,7 @@ class UnitTest(unittest.TestCase):
         run(f'docker network rm {DOCKER_NETWORK}', True)
         run(f'docker network create {DOCKER_NETWORK}')
         for i in range(1, NODE_NUMBER+1):
-            run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit{i} --name rabbit{i} -p {15672+i-1}:15672 -p {5672+i-1}:5672 rabbitmq:3-management')
+            run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit{i} --name rabbit{i} -p {15672+i-1}:15672 -p {5672+i-1}:5672 rabbitmq:{RABBITMQ_VERSION}-management')
             run(f'docker exec rabbit{i} rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
 
         # setup rabbit2
@@ -80,11 +85,73 @@ class UnitTest(unittest.TestCase):
         run(f'docker exec rabbit1 rabbitmqctl await_online_nodes {NODE_NUMBER}')
         run('docker exec rabbit1 rabbitmqctl cluster_status')
 
+    def test_creating_cluster_on_aws(self):
+        image_id = IMAGE_ID
+        test_stack_name = 'TestRabbitMQ'
+        init_cf_env(test_stack_name)
+        ###
+        t = Template()
+        sg = ts_add_security_group(t)
+        instance1 = ts_add_instance_with_public_ip(t, Ref(sg), name="RabbitMQ1", image_id=image_id, tag='rabbitmq')
+        instance2 = ts_add_instance_with_public_ip(t, Ref(sg), name="RabbitMQ2", image_id=image_id, tag='rabbitmq')
+        instance3 = ts_add_instance_with_public_ip(t, Ref(sg), name="RabbitMQ3", image_id=image_id, tag='rabbitmq')
+        t.add_output([
+            Output(
+                "PublicIP1",
+                Value=GetAtt(instance1, "PublicIp"),
+            ),
+            Output(
+                "PublicIP2",
+                Value=GetAtt(instance2, "PublicIp"),
+            ),
+            Output(
+                "PublicIP3",
+                Value=GetAtt(instance3, "PublicIp"),
+            ),
+        ])
+        dump_template(t, True)
+        cf_client.create_stack(
+            StackName=test_stack_name,
+            TemplateBody=t.to_yaml(),
+        )
+        cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
+        outputs = cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs']
+        ips = {}
+        snames = {}
+        for i in range(1, 4):
+            k = f'rabbit{i}'
+            public_ip = key_find(outputs, 'OutputKey', f'PublicIP{i}')['OutputValue']
+            snames[k] = run(f"ssh {SSH_OPTIONS} ec2-user@{public_ip} hostname -s", True)[0]
+            ips[k] = public_ip
+
+        print(f"Cluster established: {ips}, {snames}")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl stop_app")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl reset")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl join_cluster --ram rabbit@{snames['rabbit1']}")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl start_app")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl stop_app")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl reset")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl join_cluster --disc rabbit@{snames['rabbit1']}")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl start_app")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl await_online_nodes {len(ips)}")
+        return (ips, snames)
+
+
     def _test_creating_cluster(self):
-        print("Creating cluster ...")
+        print("Creating cluster with Docker...")
         with open(os.devnull, 'w') as f:
             with redirect_stdout(f), redirect_stderr(f):
                 self.test_creating_cluster()
+
+    def _test_creating_cluster_on_aws(self):
+        print("Creating cluster on AWS...")
+        with open(os.devnull, 'w') as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                return self.test_creating_cluster_on_aws()
+
 
 
     def test_reset(self):
@@ -202,77 +269,103 @@ class UnitTest(unittest.TestCase):
             another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
             self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
 
-    def test_rejoining(self):
-        # with self.subTest("Restarting ram node first"):
-        #     self._test_creating_cluster()
-        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
-        #     for i in range(1, 4):
-        #         run(f"docker exec rabbit{i} rabbitmqctl stop_app")
-        #     with self.assertRaises(Exception):
-        #         run("docker exec rabbit3 rabbitmqctl start_app")  # Mnesia could not connect to any disc nodes
-
-        # with self.subTest("Restarting node (not last stopped disc)"):
-        #     self._test_creating_cluster()
-        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
-        #     for i in range(1, 4):
-        #         run(f"docker exec rabbit{i} rabbitmqctl stop_app")
-
-        #     with self.assertRaises(TimeoutExpired):
-        #         # restart disc node that is not stopped last
-        #         run("docker exec rabbit1 rabbitmqctl start_app", timeout=30)  # Waiting for Mnesia tables
+    def test_rejoining_order(self):
+        with self.subTest("Restarting ram node first"):
+            self._test_creating_cluster()
+            self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+            for i in range(1, 4):
+                run(f"docker exec rabbit{i} rabbitmqctl stop_app")
+            with self.assertRaises(Exception):
+                # You can see such in log:
+                # {{failed_to_cluster_with,[rabbit@rabbit1,rabbit@rabbit2],"Mnesia could not connect to any nodes."},{rabbit,start,[normal,[]]}}
+                run("docker exec rabbit3 rabbitmqctl start_app")
+            time.sleep(3)
+            stdout = run('docker ps --format="{{.Names}}"')[0]
+            self.assertNotIn('rabbit3', stdout)                # vm is also down
 
 
-        #     run("docker exec rabbit2 rabbitmqctl start_app")
-        #     run("docker exec rabbit3 rabbitmqctl start_app")
-        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
-
-
-
-
-
-
-        # with self.subTest("Restarting node (last stopped disc)"):
-        #     self._test_creating_cluster()
-        #     self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
-        #     for i in range(1, 4):
-        #         run(f"docker exec rabbit{i} rabbitmqctl stop_app")
-
-        #     # restart node that is stopped last as disc
-        #     run("docker exec rabbit2 rabbitmqctl start_app")
-        #     # the restarting sequence of rabbit1 and rabbit3 does not matter
-        #     run("docker exec rabbit1 rabbitmqctl start_app")
-        #     run("docker exec rabbit3 rabbitmqctl start_app")
-        #     self.assertEqual(get_running_nodes_types(), (2, 1))
-
-        with self.subTest("Restarting disc node first (first stopped)"):
+        with self.subTest("Restarting disc node (not last stopped disc)"):
             self._test_creating_cluster()
             self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
             for i in range(1, 4):
                 run(f"docker exec rabbit{i} rabbitmqctl stop_app")
 
+            with self.assertRaises(TimeoutExpired):
+                # restart disc node that is not stopped last
+                run("docker exec rabbit1 rabbitmqctl start_app", timeout=30)  # Waiting for Mnesia tables
 
-            '''
-            通常情况下，当关闭整个 RabbitMQ 集群时，重启的第一个节点应该是最后关闭的节点，因为它可以看到其他节点所看不到的事情。
-            但是有时会有一些异常情况出现，比如整个集群都掉电而所有节点都认为它不是最后一个关闭的。
-            在这种情况下，可以调用 rabbitmqctl force_boot 命令，这就告诉节点*下次*可以无条件地启动节点。
-
-            如果最后一个关闭的节点永久丢失了，可以优先使用 rabbitmqctl forget_cluster_node 命令，因为它可以确保镜像队列的正常运转。
-            使用 forget_cluster_node 命令的话，需要删除的节点必须是 offline ，执行命令的节点必须 online ，（否则需要指定 --offline 参数）。
-            注意：如果指定执行命令的节点为 --offline ，意味着不能存在 Erlang node ，因为 rabbitmqctl 需要 mock 一个同名的 node 。
-            '''
-            run("docker exec rabbit1 rabbitmqctl force_boot")  # Ensures that the node will start NEXT TIME, even if it was not the last to shut down.
-            run("docker exec rabbit1 rabbitmqctl start_app")
             run("docker exec rabbit2 rabbitmqctl start_app")
+            run("docker exec rabbit3 rabbitmqctl start_app")
+            self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+
+
+        with self.subTest("Restarting disc node (last stopped disc)"):
+            self._test_creating_cluster()
+            self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+            for i in range(1, 4):
+                run(f"docker exec rabbit{i} rabbitmqctl stop_app")
+
+            # restart node that is stopped last as disc
+            run("docker exec rabbit2 rabbitmqctl start_app")
+            # the restarting sequence of rabbit1 and rabbit3 does not matter
+            run("docker exec rabbit1 rabbitmqctl start_app")
             run("docker exec rabbit3 rabbitmqctl start_app")
             self.assertEqual(get_running_nodes_types(), (2, 1))
 
+    def test_force_boot(self):
+        '''
+        通常情况下，当关闭整个 RabbitMQ 集群时，重启的第一个节点应该是最后关闭的节点，因为它可以看到其他节点所看不到的事情。
+        但是有时会有一些异常情况出现，比如整个集群都掉电而所有节点都认为它不是最后一个关闭的。
+        在这种情况下，可以调用 rabbitmqctl force_boot 命令，这就告诉节点*下次*可以无条件地启动节点。
+        '''
+
+        self._test_creating_cluster()
+        self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+        for i in range(1, 4):
+            run(f"docker exec rabbit{i} rabbitmqctl stop_app")
+
+        # Restarting disc node first (first stopped)
+        run("docker exec rabbit1 rabbitmqctl force_boot")  # Ensures that the node will start NEXT TIME, even if it was not the last to shut down.
+        run("docker exec rabbit1 rabbitmqctl start_app")
+        run("docker exec rabbit2 rabbitmqctl start_app")
+        run("docker exec rabbit3 rabbitmqctl start_app")
+        self.assertEqual(get_running_nodes_types(), (2, 1))
+
+    def test_forget_cluster_node(self):
+        '''
+        如果最后一个关闭的节点永久丢失了，可以使用 rabbitmqctl forget_cluster_node 命令（优先于 force_boot ），因为它可以确保镜像队列的正常运转。
+        使用 forget_cluster_node 命令的话，需要删除的节点必须是 offline ，执行命令的节点必须 online ，（否则需要指定 --offline 参数）。
+        注意：如果指定执行命令的节点为 --offline ，意味着不能存在 Erlang node ，因为 rabbitmqctl 需要 mock 一个同名的 node 。
+        '''
+        with self.subTest("When current node online"):
+            self._test_creating_cluster()
+            self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
+            run("docker exec rabbit2 rabbitmqctl stop_app")
+            run("docker exec rabbit1 rabbitmqctl forget_cluster_node rabbit@rabbit2")
+            self.assertEqual(get_running_nodes_types(), (1, 1))
 
 
+        with self.subTest("When current node offline"):
+            ips, snames = self._test_creating_cluster_on_aws()
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status")
+            self.assertEqual(get_running_nodes_types(host=ips['rabbit1']), (2, 1))  # rabbit1 and rabbit3 are disc
 
+            for i in range(1, 4):
+                k = f'rabbit{i}'
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ips[k]} sudo rabbitmqctl stop_app # on {k}")
 
+            with self.assertRaises(Exception) as raised_exception:
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl forget_cluster_node --offline rabbit@{snames['rabbit3']} # forget rabbit3 (on rabbit1)")
+            self.assertIn('this command requires the target node to be stopped', raised_exception.exception.err_msg)
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo systemctl stop rabbitmq-server # on rabbit1")
 
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl forget_cluster_node --offline rabbit@{snames['rabbit3']} # forget rabbit3 (on rabbit1)")
 
-
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo systemctl start rabbitmq-server # on rabbit1")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl start_app # on rabbit2")
+            self.assertEqual(get_running_nodes_types(host=ips['rabbit1']), (1, 1))
+            self.assertEqual(get_running_nodes_types(host=ips['rabbit2']), (1, 1))
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl cluster_status # on rabbit2")
 
 
 
@@ -288,11 +381,11 @@ class UnitTest(unittest.TestCase):
         run(f'docker network create {DOCKER_NETWORK}')
 
         # rabbit_a
-        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_a --name rabbit_a -p 15672:15672 -p 5672:5672 rabbitmq:3-management')
+        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_a --name rabbit_a -p 15672:15672 -p 5672:5672 rabbitmq:{RABBITMQ_VERSION}-management')
         run('docker exec rabbit_a rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
 
         # rabbit_b
-        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_b --name rabbit_b -p 15673:15672 -p 5673:5672 rabbitmq:3-management')
+        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_b --name rabbit_b -p 15673:15672 -p 5673:5672 rabbitmq:{RABBITMQ_VERSION}-management')
         run('docker exec rabbit_b rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
         run('docker exec rabbit_b rabbitmqctl stop_app')
         run('docker exec rabbit_b rabbitmqctl reset')
@@ -303,7 +396,7 @@ class UnitTest(unittest.TestCase):
         run('docker exec rabbit_a rabbitmqctl stop_app')  # rabbit_a offline
 
         # rabbit_c
-        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_c --name rabbit_c -p 15674:15672 -p 5674:5672 rabbitmq:3-management')
+        run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit_c --name rabbit_c -p 15674:15672 -p 5674:5672 rabbitmq:{RABBITMQ_VERSION}-management')
         run('docker exec rabbit_c rabbitmqctl wait /var/lib/rabbitmq/mnesia/rabbit.pid')
         run('docker exec rabbit_c rabbitmqctl stop_app')
         run('docker exec rabbit_c rabbitmqctl reset')
@@ -348,3 +441,6 @@ class UnitTest(unittest.TestCase):
         可以使用 rabbitmqctl cancel_sync_queue 取消队列镜像同步的操作。
         '''
         pass
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

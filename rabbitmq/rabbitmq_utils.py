@@ -172,18 +172,18 @@ def get_nodes(management_port=15672):
     return nodes
 
 
-def get_running_nodes(management_port=15672):
-    url = f'http://localhost:{management_port}/api/nodes'
-    nodes = requests.get(url, auth=('guest', 'guest')).json()
+def get_running_nodes(management_port=15672, host='localhost', user='guest', password='guest'):
+    url = f'http://{host}:{management_port}/api/nodes'
+    nodes = requests.get(url, auth=(user, password)).json()
     results = []
     for node in nodes:
         if node['running'] is True:
             results.append(node['name'])
     return results
 
-def get_running_nodes_types(management_port=15672):
-    url = f'http://localhost:{management_port}/api/nodes'
-    nodes = requests.get(url, auth=('guest', 'guest')).json()
+def get_running_nodes_types(management_port=15672, host='localhost', user='guest', password='guest'):
+    url = f'http://{host}:{management_port}/api/nodes'
+    nodes = requests.get(url, auth=(user, password)).json()
     ram = 0
     disc = 0
     for node in nodes:
