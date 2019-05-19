@@ -52,8 +52,8 @@ def all_queues():
     return get_all_queues()
 
 
-def create_vhost(vhost, port=15672):
-    data = requests.get(f'http://localhost:{port}/api/vhosts', auth=('guest', 'guest')).json()
+def create_vhost(host='localhost', vhost='/', port=15672):
+    data = requests.get(f'http://{host}:{port}/api/vhosts', auth=('guest', 'guest')).json()
     vhosts = [v['name'] for v in data]
     if vhost in vhosts:
         return
@@ -63,9 +63,9 @@ def create_vhost(vhost, port=15672):
 
 
 def pika_connection(host='localhost', port=5672, vhost='/'):
-    create_vhost(vhost, port=10000+port)
+    create_vhost(host, vhost, port=10000+port)
     return pika.BlockingConnection(pika.ConnectionParameters(
-        host='localhost',
+        host=host,
         port=port,
         virtual_host=vhost,
     ))
@@ -118,14 +118,15 @@ def pika_queue_counters(channel, queue):
             return None
         raise e
 
-def pika_simple_publish(channel, exchange, rk, body):
+def pika_simple_publish(channel, exchange, rk, body, mandatory=False):
     channel.basic_publish(exchange=exchange,
                           routing_key=rk,
                           properties=pika.BasicProperties(
                               timestamp=int(datetime.datetime.now().timestamp()),
                               content_encoding='utf-8',
                           ),
-                          body=body)
+                          body=body,
+                          mandatory=mandatory)
 
 def pika_queue_bind(channel, queue, exchange, routing_key=None, **kwargs):
     channel.queue_bind(queue, exchange, routing_key, **kwargs)

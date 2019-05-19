@@ -85,30 +85,19 @@ class UnitTest(unittest.TestCase):
         run(f'docker exec rabbit1 rabbitmqctl await_online_nodes {NODE_NUMBER}')
         run('docker exec rabbit1 rabbitmqctl cluster_status')
 
-    def test_creating_cluster_on_aws(self):
+    def test_creating_cluster_on_aws(self, instance_num=3, additional_disc_index_list=None):
+        if additional_disc_index_list is None:
+            additional_disc_index_list = []
         image_id = IMAGE_ID
         test_stack_name = 'TestRabbitMQ'
         init_cf_env(test_stack_name)
         ###
         t = Template()
         sg = ts_add_security_group(t)
-        instance1 = ts_add_instance_with_public_ip(t, Ref(sg), name="RabbitMQ1", image_id=image_id, tag='rabbitmq')
-        instance2 = ts_add_instance_with_public_ip(t, Ref(sg), name="RabbitMQ2", image_id=image_id, tag='rabbitmq')
-        instance3 = ts_add_instance_with_public_ip(t, Ref(sg), name="RabbitMQ3", image_id=image_id, tag='rabbitmq')
-        t.add_output([
-            Output(
-                "PublicIP1",
-                Value=GetAtt(instance1, "PublicIp"),
-            ),
-            Output(
-                "PublicIP2",
-                Value=GetAtt(instance2, "PublicIp"),
-            ),
-            Output(
-                "PublicIP3",
-                Value=GetAtt(instance3, "PublicIp"),
-            ),
-        ])
+        for i in range(1, instance_num+1):
+            ts_add_instance_with_public_ip(t, Ref(sg), name=f"RabbitMQ{i}", image_id=image_id, tag='rabbitmq')
+
+        t.add_output([Output(f'PublicIP{i}', Value=GetAtt(f"RabbitMQ{i}", "PublicIp")) for i in range(1, instance_num+1)])
         dump_template(t, True)
         cf_client.create_stack(
             StackName=test_stack_name,
@@ -116,9 +105,10 @@ class UnitTest(unittest.TestCase):
         )
         cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
         outputs = cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs']
+        time.sleep(10)           # wait for ssh servce starting up
         ips = {}
         snames = {}
-        for i in range(1, 4):
+        for i in range(1, instance_num+1):
             k = f'rabbit{i}'
             public_ip = key_find(outputs, 'OutputKey', f'PublicIP{i}')['OutputValue']
             snames[k] = run(f"ssh {SSH_OPTIONS} ec2-user@{public_ip} hostname -s", True)[0]
@@ -126,17 +116,15 @@ class UnitTest(unittest.TestCase):
 
         print(f"Cluster established: {ips}, {snames}")
 
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl stop_app")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl reset")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl join_cluster --ram rabbit@{snames['rabbit1']}")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl start_app")
+        for i in range(2, instance_num+1):
+            k = f'rabbit{i}'
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips[k]} sudo rabbitmqctl stop_app")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips[k]} sudo rabbitmqctl reset")
+            disc_type = 'disc' if i in additional_disc_index_list else 'ram'
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips[k]} sudo rabbitmqctl join_cluster --{disc_type} rabbit@{snames['rabbit1']}")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips[k]} sudo rabbitmqctl start_app")
 
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl stop_app")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl reset")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl join_cluster --disc rabbit@{snames['rabbit1']}")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl start_app")
-
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl await_online_nodes {len(ips)}")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl await_online_nodes {instance_num}")
         return (ips, snames)
 
 
@@ -146,11 +134,15 @@ class UnitTest(unittest.TestCase):
             with redirect_stdout(f), redirect_stderr(f):
                 self.test_creating_cluster()
 
-    def _test_creating_cluster_on_aws(self):
-        print("Creating cluster on AWS...")
+    def _test_creating_cluster_on_aws(self, instance_num=3, additional_disc_index_list=None):
+        if additional_disc_index_list is None:
+            additional_disc_index_list = []
+        print(f"Creating cluster on AWS... (instance_num: {instance_num}, additional_disc_index_list: {additional_disc_index_list})")
         with open(os.devnull, 'w') as f:
             with redirect_stdout(f), redirect_stderr(f):
-                return self.test_creating_cluster_on_aws()
+                ips, snames = self.test_creating_cluster_on_aws(instance_num, additional_disc_index_list)
+        print(f"Cluster established: {ips}, {snames}")
+        return (ips, snames)
 
 
 
@@ -331,6 +323,83 @@ class UnitTest(unittest.TestCase):
         run("docker exec rabbit3 rabbitmqctl start_app")
         self.assertEqual(get_running_nodes_types(), (2, 1))
 
+
+    def test_partition(self):
+        '''
+        node1: (queue1 created)
+
+        exchange
+         |
+         `-rk1- queue1
+         |
+         `-rk2- queue2 <---> channel1
+
+        ==============================
+
+        node2: (queue2 created)
+
+        exchange
+         |
+         `-rk2- queue2
+         |
+         `-rk1- queue1
+        '''
+        ips, snames = self._test_creating_cluster_on_aws(2)
+        channel1 = pika_channel(host=ips['rabbit1'])
+        channel2 = pika_channel(host=ips['rabbit2'])
+        exchange = pika_exchange_declare(channel1, 'exchange')
+        queue1 = pika_queue_declare(channel1, 'queue1')
+        queue2 = pika_queue_declare(channel2, 'queue2')
+        pika_queue_bind(channel1, queue2, exchange, 'rk2')
+        pika_queue_bind(channel2, queue1, exchange, 'rk1')
+
+        pika_consume(channel1, queue2, pika_simple_callback)
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q | column -t # rabbit1")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A INPUT -p tcp --dport 25672 -j DROP # rabbit2")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A OUTPUT -p tcp --dport 25672 -j DROP # rabbit2")
+        time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
+        self.assertEqual(get_running_nodes(host=ips['rabbit1']), [f'rabbit@{snames["rabbit1"]}'])
+
+        pika_simple_publish(channel2, exchange, 'rk2', 'msg1')  # can not be consumed by channel1
+
+        stdout = run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q | column -t # rabbit1")[0]
+        self.assertNotIn("queue2", stdout)  # queue2 disappeared from node1
+
+        # recover network
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D INPUT 1 # rabbit2")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D OUTPUT 1 # rabbit2")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")  # partition detected
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl cluster_status # rabbit2")  # partition detected
+
+        pika_simple_publish(channel2, exchange, 'rk2', 'msg2')  # still can not be consumed by channel1
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q | column -t # rabbit1")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl list_queues -q | column -t # rabbit2")
+        self.assertEqual(pika_queue_counters(channel2, queue2)[1], 2)
+        self.assertEqual(pika_basic_get(channel2, queue2), 'msg1')
+        self.assertEqual(pika_basic_get(channel2, queue2), 'msg2')  # can consume messages on channel2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     def test_forget_cluster_node(self):
         '''
         如果最后一个关闭的节点永久丢失了，可以使用 rabbitmqctl forget_cluster_node 命令（优先于 force_boot ），因为它可以确保镜像队列的正常运转。
@@ -346,7 +415,7 @@ class UnitTest(unittest.TestCase):
 
 
         with self.subTest("When current node offline"):
-            ips, snames = self._test_creating_cluster_on_aws()
+            ips, snames = self._test_creating_cluster_on_aws(3, [3])
             run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status")
             self.assertEqual(get_running_nodes_types(host=ips['rabbit1']), (2, 1))  # rabbit1 and rabbit3 are disc
 
