@@ -194,3 +194,18 @@ def get_running_nodes_types(management_port=15672, host='localhost', user='guest
             if node['type'] == 'disc':
                 disc += 1
     return disc, ram
+
+def get_queue_info(queue_name, host='localhost', port=15672, vhost='%2F', auth=('guest', 'guest')):
+    url = f'http://{host}:{port}/api/queues/{vhost}/{queue_name}'
+    r = requests.get(url, auth=auth)
+    if r.ok is False:
+        return None
+    return r.json()
+
+def get_queue_nodes_info(queue_name, host='localhost', port=15672, vhost='%2F', auth=('guest', 'guest')):
+    info = get_queue_info(queue_name, host, port, vhost, auth)
+    if info is None:
+        return (None, None)
+    node = info['node']
+    slave_nodes = info['slave_nodes']
+    return (node, slave_nodes)
