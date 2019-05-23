@@ -45,6 +45,15 @@ class UnitTest(unittest.TestCase):
         pika_simple_publish(channel, exchange, 'a.b.c', 'hello world')
         self.assertEqual(pika_basic_get(channel, queue), 'hello world')
 
+    def _wait_until(self, func, expect, desc=None, delay=3, tries=10):
+        while tries >= 0:
+            actual = func()
+            if actual == expect:
+                return
+            time.sleep(delay)
+            tries -= 1
+        self.fail(f"actual[{actual}] != expected[{expected}] ({desc})")
+
 
     def _test_adding_new_node(self, i, target_node='rabbit@rabbit1', node_type='ram'):
         run(f'docker run {BASIC_DOCKER_OPTS} --hostname rabbit{i} --name rabbit{i} -p {15672+i-1}:15672 -p {5672+i-1}:5672 rabbitmq:{RABBITMQ_VERSION}-management')
@@ -362,68 +371,30 @@ class UnitTest(unittest.TestCase):
         for q in [queue1, queue2, queue3]:
             print(f'Publishing msg {random_str} to {q} on rabbit1')
             pika_simple_publish(channel1, '', q, random_str)
-            time.sleep(3)
             master, slaves = get_queue_nodes_info(q, host=ips['rabbit2'])
             if master == f'rabbit@{snames["rabbit2"]}':  # 该队列原先在rabbit2上出现过，分区后在rabbit2上升级为master队列
                 self.assertIsNone(pika_basic_get(channel2, q))
                 self.assertEqual(pika_queue_counters(channel2, q)[1], 0)  # can not see msg from passive declare
-                q_info = get_queue_info(q, ips['rabbit2'])
-                self.assertEqual(q_info['messages_ready'], 1, f'queue info: {q_info}')  # can see msg from management api
+                self._wait_until(lambda: get_queue_info(q, ips['rabbit2'])['messages_ready'], 1)  # can see msg from management api
             else:
                 self.assertEqual(pika_basic_get(channel2, q), random_str)
 
+        print("Purging all msg ...")
         for q in [queue1, queue2, queue3]:
             pika_queue_purge(channel1, q)
             pika_queue_purge(channel2, q)
 
         random_str = get_uuid()
         for q in [queue1, queue2, queue3]:
+            print(f'Publishing msg {random_str} to {q} on rabbit2')
             pika_simple_publish(channel2, '', q, random_str)
             master, slaves = get_queue_nodes_info(q, host=ips['rabbit2'])
             if master == f'rabbit@{snames["rabbit2"]}':  #
                 self.assertIsNone(pika_basic_get(channel1, q))
-                self.assertEqual(pika_queue_counters(channel1, q)[1], 0)
-                self.assertEqual(get_queue_info(q, ips['rabbit1'])['messages_ready'], 1)
+                self.assertEqual(pika_queue_counters(channel1, q)[1], 0)  # can not see msg from passive declare
+                self._wait_until(lambda: get_queue_info(q, ips['rabbit1'])['messages_ready'], 1)  # can see msg from management api
             else:
                 self.assertEqual(pika_basic_get(channel1, q), random_str)
-
-        # queue1_node_, queue1_slave_nodes_ = get_queue_nodes_info('queue1', host=ips['rabbit1'])
-        # queue2_node_, queue2_slave_nodes_ = get_queue_nodes_info('queue2', host=ips['rabbit1'])
-        # queue3_node_, queue3_slave_nodes_ = get_queue_nodes_info('queue3', host=ips['rabbit1'])
-
-        # queue1_node__, queue1_slave_nodes__ = get_queue_nodes_info('queue1', host=ips['rabbit2'])
-        # queue2_node__, queue2_slave_nodes__ = get_queue_nodes_info('queue2', host=ips['rabbit2'])
-        # queue3_node__, queue3_slave_nodes__ = get_queue_nodes_info('queue3', host=ips['rabbit2'])
-
-        # if queue1_slave_nodes == [f'rabbit@{snames["rabbit2"]}']:
-        #     self.assertEqual(queue1_slave_nodes_, [f'rabbit@{snames["rabbit3"]}'])
-        #     self.assertEqual(queue1_node__, f'rabbit@{snames["rabbit2"]}'),
-        #     self.assertEqual(queue1_slave_nodes__, [])
-        # else:
-        #     self.assertEqual(queue1_slave_nodes_, queue1_slave_nodes)
-        #     self.assertIsNone(queue1_node__)
-
-
-        # if queue3_slave_nodes == [f'rabbit@{snames["rabbit2"]}']:
-        #     self.assertEqual(queue3_slave_nodes_, [f'rabbit@{snames["rabbit1"]}'])
-        #     self.assertEqual(queue3_node__, f'rabbit@{snames["rabbit2"]}')
-        #     self.assertEqual(queue3_slave_nodes__, [])
-        # else:
-        #     self.assertEqual(queue3_slave_nodes_, queue3_slave_nodes)
-        #     self.assertIsNone(queue3_node__)
-
-        # self.assertEqual(queue2_node_, queue2_slave_nodes[0])
-        # self.assertEqual(queue2_node__, queue2_node)
-        # self.assertEqual(queue2_slave_nodes__, [])
-
-
-
-
-
-
-
-
-
 
 
     def test_partition_without_ha(self):
