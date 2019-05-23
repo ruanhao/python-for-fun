@@ -9,6 +9,7 @@ import pika
 import subprocess
 import sys
 import uuid
+from retry import retry
 
 def get_uuid():
     return str(uuid.uuid4())
@@ -148,7 +149,17 @@ def pika_basic_get(channel, queue):
     else:
         return None
 
-def run(script, quiet=False, timeout=60):
+def translate(text, translation):
+    for f, t in translation.items():
+        text = text.replace(f, t)
+    return text
+
+def reverse_dict(d):
+    return {v: k for k, v in d.items()}
+
+
+
+def run(script, quiet=False, timeout=60, translation=None):
     if quiet is False:
         print(f"====== {script} ======")
     proc = subprocess.Popen(['bash', '-c', script],
@@ -157,11 +168,16 @@ def run(script, quiet=False, timeout=60):
     stdout, stderr = proc.communicate(timeout=timeout)
     stdout_str = stdout.decode('utf-8').rstrip('\n')
     stderr_str = stderr.decode('utf-8').rstrip('\n')
+    if translation is not None:
+        stdout_str = translate(stdout_str, translation)
+        stderr_str = translate(stderr_str, translation)
     if quiet is False:
-        print(f'{stdout_str}')
-        print(f'{stderr_str}', file=sys.stderr)
+        if stdout_str.strip():
+            print(f'{stdout_str}')
+        if stderr_str.strip():
+            print(f'{stderr_str}', file=sys.stderr)
         if proc.returncode:
-            e = Exception()
+            e = Exception(stderr_str)
             e.err_code = proc.returncode
             e.err_msg = stderr_str
             raise e
@@ -202,6 +218,7 @@ def get_queue_info(queue_name, host='localhost', port=15672, vhost='%2F', auth=(
         return None
     return r.json()
 
+@retry(KeyError, tries=3, delay=3)
 def get_queue_nodes_info(queue_name, host='localhost', port=15672, vhost='%2F', auth=('guest', 'guest')):
     info = get_queue_info(queue_name, host, port, vhost, auth)
     if info is None:

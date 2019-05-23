@@ -114,7 +114,7 @@ class UnitTest(unittest.TestCase):
             snames[k] = run(f"ssh {SSH_OPTIONS} ec2-user@{public_ip} hostname -s", True)[0]
             ips[k] = public_ip
 
-        print(f"Cluster established: {ips}, {snames}")
+        print(f"Cluster established.\n{ips}\n{snames}")
 
         for i in range(2, instance_num+1):
             k = f'rabbit{i}'
@@ -141,7 +141,7 @@ class UnitTest(unittest.TestCase):
         with open(os.devnull, 'w') as f:
             with redirect_stdout(f), redirect_stderr(f):
                 ips, snames = self.test_creating_cluster_on_aws(instance_num, additional_disc_index_list)
-        print(f"Cluster established: {ips}, {snames}")
+        print(f"Cluster established.\n{ips}\n{snames}")
         return (ips, snames)
 
 
@@ -335,50 +335,86 @@ class UnitTest(unittest.TestCase):
         queue3 = pika_queue_declare(channel3, 'queue3')
 
         run(f"""ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} 'sudo rabbitmqctl set_policy --priority 0 --apply-to queues pl ".*" "{{\\"ha-mode\\": \\"exactly\\", \\"ha-params\\": 2}}"'""")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids| column -t # rabbit1")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
 
         queue1_node, queue1_slave_nodes = get_queue_nodes_info('queue1', host=ips['rabbit1'])
         queue2_node, queue2_slave_nodes = get_queue_nodes_info('queue2', host=ips['rabbit1'])
         queue3_node, queue3_slave_nodes = get_queue_nodes_info('queue3', host=ips['rabbit1'])
 
+        print("Mock network failure ...")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A INPUT -p tcp --dport 25672 -j DROP # rabbit2")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A OUTPUT -p tcp --dport 25672 -j DROP # rabbit2")
         time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+        print("Mock network restoring ...")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D INPUT 1 # rabbit2")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D OUTPUT 1 # rabbit2")
 
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids| column -t # rabbit1")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
 
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl list_queues -q name pid slave_pids| column -t # rabbit2")
-
-        queue1_node_, queue1_slave_nodes_ = get_queue_nodes_info('queue1', host=ips['rabbit1'])
-        queue2_node_, queue2_slave_nodes_ = get_queue_nodes_info('queue2', host=ips['rabbit1'])
-        queue3_node_, queue3_slave_nodes_ = get_queue_nodes_info('queue3', host=ips['rabbit1'])
-
-        queue1_node__, queue1_slave_nodes__ = get_queue_nodes_info('queue1', host=ips['rabbit2'])
-        queue2_node__, queue2_slave_nodes__ = get_queue_nodes_info('queue2', host=ips['rabbit2'])
-        queue3_node__, queue3_slave_nodes__ = get_queue_nodes_info('queue3', host=ips['rabbit2'])
-
-        if queue1_slave_nodes == [f'rabbit@{snames["rabbit2"]}']:
-            self.assertEqual(queue1_slave_nodes_, [f'rabbit@{snames["rabbit3"]}'])
-            self.assertEqual(queue1_node__, f'rabbit@{snames["rabbit2"]}'),
-            self.assertEqual(queue1_slave_nodes__, [])
-        else:
-            self.assertEqual(queue1_slave_nodes_, queue1_slave_nodes)
-            self.assertIsNone(queue1_node__)
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit2", translation=reverse_dict(snames))
 
 
-        if queue3_slave_nodes == [f'rabbit@{snames["rabbit2"]}']:
-            self.assertEqual(queue3_slave_nodes_, [f'rabbit@{snames["rabbit1"]}'])
-            self.assertEqual(queue3_node__, f'rabbit@{snames["rabbit2"]}')
-            self.assertEqual(queue3_slave_nodes__, [])
-        else:
-            self.assertEqual(queue3_slave_nodes_, queue3_slave_nodes)
-            self.assertIsNone(queue3_node__)
+        self.assertFalse(channel1.is_closed)
+        self.assertFalse(channel2.is_closed)
+        self.assertFalse(channel3.is_closed)
 
-        self.assertEqual(queue2_node_, queue2_slave_nodes[0])
-        self.assertEqual(queue2_node__, queue2_node)
-        self.assertEqual(queue2_slave_nodes__, [])
+        random_str = get_uuid()
+        for q in [queue1, queue2, queue3]:
+            print(f'Publishing msg {random_str} to {q} on rabbit1')
+            pika_simple_publish(channel1, '', q, random_str)
+            time.sleep(3)
+            master, slaves = get_queue_nodes_info(q, host=ips['rabbit2'])
+            if master == f'rabbit@{snames["rabbit2"]}':  # 该队列原先在rabbit2上出现过，分区后在rabbit2上升级为master队列
+                self.assertIsNone(pika_basic_get(channel2, q))
+                self.assertEqual(pika_queue_counters(channel2, q)[1], 0)  # can not see msg from passive declare
+                q_info = get_queue_info(q, ips['rabbit2'])
+                self.assertEqual(q_info['messages_ready'], 1, f'queue info: {q_info}')  # can see msg from management api
+            else:
+                self.assertEqual(pika_basic_get(channel2, q), random_str)
+
+        for q in [queue1, queue2, queue3]:
+            pika_queue_purge(channel1, q)
+            pika_queue_purge(channel2, q)
+
+        random_str = get_uuid()
+        for q in [queue1, queue2, queue3]:
+            pika_simple_publish(channel2, '', q, random_str)
+            master, slaves = get_queue_nodes_info(q, host=ips['rabbit2'])
+            if master == f'rabbit@{snames["rabbit2"]}':  #
+                self.assertIsNone(pika_basic_get(channel1, q))
+                self.assertEqual(pika_queue_counters(channel1, q)[1], 0)
+                self.assertEqual(get_queue_info(q, ips['rabbit1'])['messages_ready'], 1)
+            else:
+                self.assertEqual(pika_basic_get(channel1, q), random_str)
+
+        # queue1_node_, queue1_slave_nodes_ = get_queue_nodes_info('queue1', host=ips['rabbit1'])
+        # queue2_node_, queue2_slave_nodes_ = get_queue_nodes_info('queue2', host=ips['rabbit1'])
+        # queue3_node_, queue3_slave_nodes_ = get_queue_nodes_info('queue3', host=ips['rabbit1'])
+
+        # queue1_node__, queue1_slave_nodes__ = get_queue_nodes_info('queue1', host=ips['rabbit2'])
+        # queue2_node__, queue2_slave_nodes__ = get_queue_nodes_info('queue2', host=ips['rabbit2'])
+        # queue3_node__, queue3_slave_nodes__ = get_queue_nodes_info('queue3', host=ips['rabbit2'])
+
+        # if queue1_slave_nodes == [f'rabbit@{snames["rabbit2"]}']:
+        #     self.assertEqual(queue1_slave_nodes_, [f'rabbit@{snames["rabbit3"]}'])
+        #     self.assertEqual(queue1_node__, f'rabbit@{snames["rabbit2"]}'),
+        #     self.assertEqual(queue1_slave_nodes__, [])
+        # else:
+        #     self.assertEqual(queue1_slave_nodes_, queue1_slave_nodes)
+        #     self.assertIsNone(queue1_node__)
+
+
+        # if queue3_slave_nodes == [f'rabbit@{snames["rabbit2"]}']:
+        #     self.assertEqual(queue3_slave_nodes_, [f'rabbit@{snames["rabbit1"]}'])
+        #     self.assertEqual(queue3_node__, f'rabbit@{snames["rabbit2"]}')
+        #     self.assertEqual(queue3_slave_nodes__, [])
+        # else:
+        #     self.assertEqual(queue3_slave_nodes_, queue3_slave_nodes)
+        #     self.assertIsNone(queue3_node__)
+
+        # self.assertEqual(queue2_node_, queue2_slave_nodes[0])
+        # self.assertEqual(queue2_node__, queue2_node)
+        # self.assertEqual(queue2_slave_nodes__, [])
 
 
 
