@@ -334,6 +334,19 @@ class UnitTest(unittest.TestCase):
 
 
     def test_partition_with_ha(self):
+        '''
+        rabbit@rabbit1 (channel1)
+        queue1 (master)
+
+        rabbit@rabbit3 (channel3)
+        queue3 (master)
+
+        ======== Network Partition =======
+
+        rabbit@rabbit2 (channel2)
+        queue2 (master)
+
+        '''
         ips, snames = self._test_creating_cluster_on_aws(3)
         channel1 = pika_channel(host=ips['rabbit1'])
         channel2 = pika_channel(host=ips['rabbit2'])
