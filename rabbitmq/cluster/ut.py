@@ -372,9 +372,7 @@ class UnitTest(unittest.TestCase):
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D OUTPUT 1 # rabbit2")
 
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
-
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit2", translation=reverse_dict(snames))
-
 
         self.assertFalse(channel1.is_closed)
         self.assertFalse(channel2.is_closed)
@@ -412,23 +410,11 @@ class UnitTest(unittest.TestCase):
 
     def test_partition_without_ha(self):
         '''
-        node1: (queue1 created)
-
-        exchange
-         |
-         `-rk1- queue1
-         |
-         `-rk2- queue2 <---> channel1
-
-        ==============================
-
-        node2: (queue2 created)
-
-        exchange
-         |
-         `-rk2- queue2
-         |
-         `-rk1- queue1
+        node1: (channel1)
+        queue1
+        ======== Network Partition ========
+        node2: (channel2)
+        queue2
         '''
         ips, snames = self._test_creating_cluster_on_aws(2)
         channel1 = pika_channel(host=ips['rabbit1'])
@@ -439,38 +425,40 @@ class UnitTest(unittest.TestCase):
         pika_queue_bind(channel1, queue2, exchange, 'rk2')
         pika_queue_bind(channel2, queue1, exchange, 'rk1')
 
-        pika_consume(channel1, queue2, pika_simple_callback)
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
 
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q | column -t # rabbit1")
-
+        print("Mock network failure ...")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A INPUT -p tcp --dport 25672 -j DROP # rabbit2")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A OUTPUT -p tcp --dport 25672 -j DROP # rabbit2")
         time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
 
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
+        stdout = run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1",
+                     translation=reverse_dict(snames))[0]
         self.assertEqual(get_running_nodes(host=ips['rabbit1']), [f'rabbit@{snames["rabbit1"]}'])
-
-        pika_simple_publish(channel2, exchange, 'rk2', 'msg1')  # can not be consumed by channel1
-
-        stdout = run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q | column -t # rabbit1")[0]
         self.assertNotIn("queue2", stdout)  # queue2 disappeared from node1
+        self.assertIsNone(get_queue_info(queue2, ips['rabbit1']))
 
         # recover network
+        print("Recovering network ...")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D INPUT 1 # rabbit2")
         run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D OUTPUT 1 # rabbit2")
 
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")  # partition detected
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl cluster_status # rabbit2")  # partition detected
+        self.assertFalse(channel1.is_closed)
+        self.assertFalse(channel2.is_closed)
 
-        pika_simple_publish(channel2, exchange, 'rk2', 'msg2')  # still can not be consumed by channel1
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q | column -t # rabbit1")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl list_queues -q | column -t # rabbit2")
-        self.assertEqual(pika_queue_counters(channel2, queue2)[1], 2)
-        self.assertEqual(pika_basic_get(channel2, queue2), 'msg1')
-        self.assertEqual(pika_basic_get(channel2, queue2), 'msg2')  # can consume messages on channel2
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))  # partition detected
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl cluster_status # rabbit2", translation=reverse_dict(snames))  # partition detected
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1",
+            translation=reverse_dict(snames))
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit2",
+            translation=reverse_dict(snames))
 
-
+        pika_simple_publish(channel2, '', queue1, 'msg1')  # no master pid info for queue1 on rabbit2
+        self.assertIsNone(pika_basic_get(channel1, queue1))  # can not be consumed by channel1 of course
+        pika_simple_publish(channel2, '', queue2, 'msg2')    # master pid info for queue2 still on rabbit2
+        self.assertEqual(pika_basic_get(channel2, queue2), 'msg2')  # can consume messages on channel2 of course
 
 
     def test_forget_cluster_node(self):
