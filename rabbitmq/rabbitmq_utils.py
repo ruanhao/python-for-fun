@@ -66,6 +66,7 @@ def create_vhost(host='localhost', vhost='/', port=15672):
 def pika_connection(host='localhost', port=5672, vhost='/'):
     create_vhost(host, vhost, port=10000+port)
     return pika.BlockingConnection(pika.ConnectionParameters(
+        heartbeat=600,
         host=host,
         port=port,
         virtual_host=vhost,
