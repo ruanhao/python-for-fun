@@ -584,8 +584,6 @@ class UnitTest(unittest.TestCase):
             Partition2: rabbit3, rabbit4
             '''
             ips, snames = self._test_creating_cluster_on_aws(4)
-            internal_ip_rabbit3 = snames['rabbit3'][3:].replace('-', '.')
-
             for node, ip in ips.items():
                 run(f"echo 'cluster_partition_handling = pause_minority' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
                 run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo systemctl restart rabbitmq-server # {node}")
@@ -657,6 +655,48 @@ class UnitTest(unittest.TestCase):
 
             run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
             self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 3)
+
+    def test_partition_handling_strategy_pause_if_all_down(self):
+        '''
+        All the listed nodes must be down for RabbitMQ to pause a cluster node.
+        This is close to the pause-minority mode, however,
+        it allows an administrator to decide which nodes to prefer, instead of relying on the context.
+        '''
+
+        with self.subTest('Listed nodes not partitioned'):
+            ips, snames = self._test_creating_cluster_on_aws(4)
+
+            for node, ip in ips.items():
+                run(f"echo 'cluster_partition_handling = pause_if_all_down' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.recover = ignore' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.nodes.1 = rabbit@{snames['rabbit1']}' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.nodes.2 = rabbit@{snames['rabbit2']}' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo systemctl restart rabbitmq-server # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl environment | grep pause_if_all_down # {node}")
+
+            print("Mocking network failure")
+            internal_ip_rabbit1 = snames['rabbit1'][3:].replace('-', '.')
+            internal_ip_rabbit2 = snames['rabbit2'][3:].replace('-', '.')
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit3")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit4")
+            time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+
+            for node, ip in ips.items():
+                if node in ['rabbit3', 'rabbit4']:
+                    with self.assertRaises(Exception) as raised_exception:
+                        run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl cluster_status # {node}")
+                        self.assertIn("this command requires the 'rabbit' app to be running on the target node",
+                                      raised_exception.exception.err_msg)
+                else:           # rabbit1 or rabbit2
+                    self.assertEqual(len(get_running_nodes(host=ip)), 2)
+
 
 
     def test_forget_cluster_node(self):
