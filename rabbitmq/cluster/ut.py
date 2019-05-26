@@ -664,8 +664,11 @@ class UnitTest(unittest.TestCase):
         '''
 
         with self.subTest('Listed nodes not partitioned'):
+            '''
+            Partition1: rabbit1(preferred), rabbit2(preferred)
+            Partition2: rabbit3, rabbit4
+            '''
             ips, snames = self._test_creating_cluster_on_aws(4)
-
             for node, ip in ips.items():
                 run(f"echo 'cluster_partition_handling = pause_if_all_down' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
                 run(f"echo 'cluster_partition_handling.pause_if_all_down.recover = ignore' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
@@ -694,8 +697,91 @@ class UnitTest(unittest.TestCase):
                         run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl cluster_status # {node}")
                         self.assertIn("this command requires the 'rabbit' app to be running on the target node",
                                       raised_exception.exception.err_msg)
-                else:           # rabbit1 or rabbit2
+                else:           # rabbit1 or rabbit2 (if mode is pause-minority, rabbit1 and rabbit2 will also be paused)
                     self.assertEqual(len(get_running_nodes(host=ip)), 2)
+
+        with self.subTest('Listed nodes partitioned'):
+            '''
+            Partition1: rabbit1, rabbit2(preferred)
+            Partition2: rabbit3(preferred), rabbit4
+            '''
+            ips, snames = self._test_creating_cluster_on_aws(4)
+            for node, ip in ips.items():
+                run(f"echo 'cluster_partition_handling = pause_if_all_down' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.recover = ignore' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.nodes.1 = rabbit@{snames['rabbit2']}' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.nodes.2 = rabbit@{snames['rabbit3']}' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo systemctl restart rabbitmq-server # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl environment | grep pause_if_all_down # {node}")
+
+            print("Mocking network failure")
+            internal_ip_rabbit1 = snames['rabbit1'][3:].replace('-', '.')
+            internal_ip_rabbit2 = snames['rabbit2'][3:].replace('-', '.')
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit3")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit4")
+            time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+
+            for node, ip in ips.items():
+                # No node will pause.
+                # Thit is why there is an additional ignore/autoheal argument (pause_if_all_down.recover) to indicate how to recover from the partition.
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl cluster_status # {node}")
+            self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 2)
+            self.assertEqual(len(get_running_nodes(host=ips['rabbit3'])), 2)
+
+            print("Mocking network restoration")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -F # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -F # rabbit4")
+            time.sleep(10)
+            self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 2)  # becaus pause_if_all_down.recover = ignoree
+
+        with self.subTest('Listed nodes partitioned and autoheal when recovering'):
+            '''
+            Partition1: rabbit1, rabbit2(preferred)
+            Partition2: rabbit3(preferred), rabbit4
+            '''
+            ips, snames = self._test_creating_cluster_on_aws(4)
+            for node, ip in ips.items():
+                run(f"echo 'cluster_partition_handling = pause_if_all_down' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.recover = autoheal' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.nodes.1 = rabbit@{snames['rabbit2']}' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"echo 'cluster_partition_handling.pause_if_all_down.nodes.2 = rabbit@{snames['rabbit3']}' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo systemctl restart rabbitmq-server # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl environment | grep pause_if_all_down # {node}")
+
+            print("Mocking network failure")
+            internal_ip_rabbit1 = snames['rabbit1'][3:].replace('-', '.')
+            internal_ip_rabbit2 = snames['rabbit2'][3:].replace('-', '.')
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit3")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit4")
+            time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+
+            for node, ip in ips.items():
+                # No node will pause.
+                # Thit is why there is an additional ignore/autoheal argument (pause_if_all_down.recover) to indicate how to recover from the partition.
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl cluster_status # {node}")
+            self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 2)
+            self.assertEqual(len(get_running_nodes(host=ips['rabbit3'])), 2)
+
+            print("Mocking network restoration")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -F # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -F # rabbit4")
+            time.sleep(10)
+            self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 4)
+
 
 
 
