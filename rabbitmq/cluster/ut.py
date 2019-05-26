@@ -332,123 +332,6 @@ class UnitTest(unittest.TestCase):
         run("docker exec rabbit3 rabbitmqctl start_app")
         self.assertEqual(get_running_nodes_types(), (2, 1))
 
-
-    def test_recovering_from_partition_by_restarting_all_nodes(self):
-        '''
-        rabbit1 (disc)
-        rabbit2 (ram)
-        === network partition ===
-        rabbit3 (disc)
-        rabbit4 (ram)
-        '''
-        ips, snames = self._test_creating_cluster_on_aws(4, additional_disc_index_list=[3])
-        internal_ips = {}
-        for node, sname in snames.items():
-            internal_ip = sname[3:].replace('-', '.')
-            internal_ips[node] = internal_ip
-        print(f'internal ips: {internal_ips}')
-
-        channel1 = pika_channel(host=ips['rabbit1'])
-        channel2 = pika_channel(host=ips['rabbit2'])
-        channel3 = pika_channel(host=ips['rabbit3'])
-        channel4 = pika_channel(host=ips['rabbit4'])
-
-        queue1 = pika_queue_declare(channel1, 'queue1', durable=True)
-        queue2 = pika_queue_declare(channel2, 'queue2', durable=True)
-        queue3 = pika_queue_declare(channel3, 'queue3', durable=True)
-        queue4 = pika_queue_declare(channel4, 'queue4', durable=True)
-
-        run(f"""ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} 'sudo rabbitmqctl set_policy --priority 0 --apply-to queues pl ".*" "{{\\"ha-mode\\": \\"all\\"}}"'""")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
-
-        print("Mock network failure ...")
-        for ip in [ips['rabbit3'], ips['rabbit4']]:
-            for internal_ip in [internal_ips['rabbit1'], internal_ips['rabbit2']]:
-                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -I INPUT  -s {internal_ip} -j DROP")
-                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -I OUTPUT -d {internal_ip} -j DROP")
-        time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
-        print("Mock network restoring ...")
-        for ip in [ips['rabbit3'], ips['rabbit4']]:
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D INPUT 1")
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D INPUT 1")
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D OUTPUT 1")
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D OUTPUT 1")
-
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1",
-            translation=reverse_dict(snames))
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit3",
-            translation=reverse_dict(snames))
-
-        self.assertFalse(channel1.is_closed)
-        self.assertFalse(channel2.is_closed)
-        self.assertFalse(channel3.is_closed)
-        self.assertFalse(channel4.is_closed)
-
-        for node, ip in ips.items():
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl stop_app # {node}")
-
-        with self.assertRaises(Exception):
-            # "Mnesia could not connect to any nodes." in log
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl start_app # rabbit2")
-
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl start_app # rabbit1")
-        # wait until rabbit1 is ready, otherwise startging rabbit2 may fail
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl await_online_nodes 1 # rabbit1")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl start_app # rabbit2")
-
-        new_channel1 = pika_channel(host=ips['rabbit1'])
-        pika_simple_publish(new_channel1, '', queue1, "msg in partition1")
-
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl start_app # rabbit3")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo rabbitmqctl start_app # rabbit4")
-
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q {QUEUE_INFOS} | column -t # rabbit1",
-            translation=reverse_dict(snames))
-        # only slave queue1 on rabbit2 is synchronized
-        # this is because the default mode for ha-sync-mode is 'manual'
-        self.assertEqual(get_queue_info(queue1, ips['rabbit1'])['synchronised_slave_nodes'], [f'rabbit@{snames["rabbit2"]}'])
-
-        new_channel3 = pika_channel(host=ips['rabbit3'])
-        # slave queue1 on rabbit3 will sync master from trust partition
-        self.assertEqual(pika_basic_get(new_channel3, queue1), 'msg in partition1')
-        # now all queue1 slaves are synchronized
-        self._wait_until(lambda: len(get_queue_info(queue1, ips['rabbit1'])['synchronised_slave_nodes']), 3)
-
-    def test_recovering_from_partition_by_restarting_nodes_in_untrust_partition(self):
-        '''
-        rabbit1(disc)
-        rabbit3(ram)
-        === network partition ===
-        rabbit2(ram)
-        '''
-        ips, snames = self._test_creating_cluster_on_aws(3)
-        print("Mock network failure ...")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A INPUT -p tcp --dport 25672 -j DROP # rabbit2")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A OUTPUT -p tcp --dport 25672 -j DROP # rabbit2")
-        time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
-        print("Mock network restoring ...")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D INPUT 1 # rabbit2")
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D OUTPUT 1 # rabbit2")
-
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
-
-        running_nodes_partition1 = get_running_nodes(host=ips['rabbit1'])
-        self.assertEqual(len(running_nodes_partition1), 2)
-        self.assertIn(f'rabbit@{snames["rabbit1"]}', running_nodes_partition1)
-        self.assertIn(f'rabbit@{snames["rabbit3"]}', running_nodes_partition1)
-
-        ips_partition1 = [ips['rabbit1'], ips['rabbit3']]
-        for ip in ips_partition1:
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl stop_app")
-        for ip in reversed(ips_partition1):  # the order does not matter in fact
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl start_app")
-
-        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
-        self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 3)
-
-
     def test_partition_with_ha(self):
         '''
         rabbit@rabbit1 (channel1)
@@ -575,6 +458,205 @@ class UnitTest(unittest.TestCase):
         self.assertIsNone(pika_basic_get(channel1, queue1))  # can not be consumed by channel1 of course
         pika_simple_publish(channel2, '', queue2, 'msg2')    # master pid info for queue2 still on rabbit2
         self.assertEqual(pika_basic_get(channel2, queue2), 'msg2')  # can consume messages on channel2 of course
+
+
+
+    def test_recovering_from_partition_by_restarting_all_nodes(self):
+        '''
+        rabbit1 (disc)
+        rabbit2 (ram)
+        === network partition ===
+        rabbit3 (disc)
+        rabbit4 (ram)
+        '''
+        ips, snames = self._test_creating_cluster_on_aws(4, additional_disc_index_list=[3])
+        internal_ips = {}
+        for node, sname in snames.items():
+            internal_ip = sname[3:].replace('-', '.')
+            internal_ips[node] = internal_ip
+        print(f'internal ips: {internal_ips}')
+
+        channel1 = pika_channel(host=ips['rabbit1'])
+        channel2 = pika_channel(host=ips['rabbit2'])
+        channel3 = pika_channel(host=ips['rabbit3'])
+        channel4 = pika_channel(host=ips['rabbit4'])
+
+        queue1 = pika_queue_declare(channel1, 'queue1', durable=True)
+        queue2 = pika_queue_declare(channel2, 'queue2', durable=True)
+        queue3 = pika_queue_declare(channel3, 'queue3', durable=True)
+        queue4 = pika_queue_declare(channel4, 'queue4', durable=True)
+
+        run(f"""ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} 'sudo rabbitmqctl set_policy --priority 0 --apply-to queues pl ".*" "{{\\"ha-mode\\": \\"all\\"}}"'""")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
+
+        print("Mock network failure ...")
+        for ip in [ips['rabbit3'], ips['rabbit4']]:
+            for internal_ip in [internal_ips['rabbit1'], internal_ips['rabbit2']]:
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -I INPUT  -s {internal_ip} -j DROP")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -I OUTPUT -d {internal_ip} -j DROP")
+        time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+        print("Mock network restoring ...")
+        for ip in [ips['rabbit3'], ips['rabbit4']]:
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D INPUT 1")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D INPUT 1")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D OUTPUT 1")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo iptables -D OUTPUT 1")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1",
+            translation=reverse_dict(snames))
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit3",
+            translation=reverse_dict(snames))
+
+        self.assertFalse(channel1.is_closed)
+        self.assertFalse(channel2.is_closed)
+        self.assertFalse(channel3.is_closed)
+        self.assertFalse(channel4.is_closed)
+
+        for node, ip in ips.items():
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl stop_app # {node}")
+
+        with self.assertRaises(Exception):
+            # "Mnesia could not connect to any nodes." in log
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl start_app # rabbit2")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl start_app # rabbit1")
+        # wait until rabbit1 is ready, otherwise startging rabbit2 may fail
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl await_online_nodes 1 # rabbit1")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl start_app # rabbit2")
+
+        new_channel1 = pika_channel(host=ips['rabbit1'])
+        pika_simple_publish(new_channel1, '', queue1, "msg in partition1")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo rabbitmqctl start_app # rabbit3")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo rabbitmqctl start_app # rabbit4")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q {QUEUE_INFOS} | column -t # rabbit1",
+            translation=reverse_dict(snames))
+        # only slave queue1 on rabbit2 is synchronized
+        # this is because the default mode for ha-sync-mode is 'manual'
+        self.assertEqual(get_queue_info(queue1, ips['rabbit1'])['synchronised_slave_nodes'], [f'rabbit@{snames["rabbit2"]}'])
+
+        new_channel3 = pika_channel(host=ips['rabbit3'])
+        # slave queue1 on rabbit3 will sync master from trust partition
+        self.assertEqual(pika_basic_get(new_channel3, queue1), 'msg in partition1')
+        # now all queue1 slaves are synchronized
+        self._wait_until(lambda: len(get_queue_info(queue1, ips['rabbit1'])['synchronised_slave_nodes']), 3)
+
+    def test_recovering_from_partition_by_restarting_nodes_in_untrust_partition(self):
+        '''
+        rabbit1(disc)
+        rabbit3(ram)
+        === network partition ===
+        rabbit2(ram)
+        '''
+        ips, snames = self._test_creating_cluster_on_aws(3)
+        print("Mock network failure ...")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A INPUT -p tcp --dport 25672 -j DROP # rabbit2")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -A OUTPUT -p tcp --dport 25672 -j DROP # rabbit2")
+        time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+        print("Mock network restoring ...")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D INPUT 1 # rabbit2")
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D OUTPUT 1 # rabbit2")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
+
+        running_nodes_partition1 = get_running_nodes(host=ips['rabbit1'])
+        self.assertEqual(len(running_nodes_partition1), 2)
+        self.assertIn(f'rabbit@{snames["rabbit1"]}', running_nodes_partition1)
+        self.assertIn(f'rabbit@{snames["rabbit3"]}', running_nodes_partition1)
+
+        ips_partition1 = [ips['rabbit1'], ips['rabbit3']]
+        for ip in ips_partition1:
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl stop_app")
+        for ip in reversed(ips_partition1):  # the order does not matter in fact
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl start_app")
+
+        run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1")
+        self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 3)
+
+
+    def test_partition_handling_strategy_pause_minority(self):
+        with self.subTest("4 nodes"):
+            '''
+            Partition1: rabbit1, rabbit2
+            Partition2: rabbit3, rabbit4
+            '''
+            ips, snames = self._test_creating_cluster_on_aws(4)
+            internal_ip_rabbit3 = snames['rabbit3'][3:].replace('-', '.')
+
+            for node, ip in ips.items():
+                run(f"echo 'cluster_partition_handling = pause_minority' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo systemctl restart rabbitmq-server # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl environment | grep pause_minority # {node}")
+
+            print("Mocking network failure")
+            internal_ip_rabbit1 = snames['rabbit1'][3:].replace('-', '.')
+            internal_ip_rabbit2 = snames['rabbit2'][3:].replace('-', '.')
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit3")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit1} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I INPUT  -s {internal_ip_rabbit2} -j DROP # rabbit4")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -I OUTPUT -d {internal_ip_rabbit2} -j DROP # rabbit4")
+            time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+            # The minority nodes will pause as soon as a partition starts
+            for node, ip in ips.items():
+                with self.assertRaises(Exception) as raised_exception:
+                    run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl cluster_status # {node}")
+                    self.assertIn("this command requires the 'rabbit' app to be running on the target node",
+                                  raised_exception.exception.err_msg)
+            print("Mocking network restoration")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit3']} sudo iptables -F # rabbit3")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -F # rabbit4")
+
+            time.sleep(10)           # wait for rabbit1 ready
+            # Monority node swill start again when the partition ends.
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl await_online_nodes 4 # rabbit1")
+
+        with self.subTest("3 nodes"):
+            '''
+                     rabbit1
+                     /     \
+                    /       \
+              rabbit2 --x--  rabbit3
+
+
+            Partition1: rabbit1, rabbit3
+            Partition2: rabbit2
+
+            '''
+            ips, snames = self._test_creating_cluster_on_aws(3)
+            internal_ip_rabbit3 = snames['rabbit3'][3:].replace('-', '.')
+
+            for node, ip in ips.items():
+                run(f"echo 'cluster_partition_handling = pause_minority' | ssh {SSH_OPTIONS} ec2-user@{ip} sudo tee -a /etc/rabbitmq/rabbitmq.conf # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo systemctl restart rabbitmq-server # {node}")
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl environment | grep pause_minority # {node}")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
+
+            print("Mocking network failure")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -I INPUT -s {internal_ip_rabbit3} -j DROP # rabbit2")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -I OUTPUT -d {internal_ip_rabbit3} -j DROP # rabbit2")
+            time.sleep(90)          # wait at least 75s to trigger net_tick_timeout
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
+            with self.assertRaises(Exception) as raised_exception:
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl cluster_status # rabbit2")
+            self.assertIn("this command requires the 'rabbit' app to be running on the target node",
+                          raised_exception.exception.err_msg)
+
+            print("Mocking network restoration")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D INPUT 1 # rabbit2")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo iptables -D OUTPUT 1 # rabbit2")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # rabbit1", translation=reverse_dict(snames))
+            self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 3)
 
 
     def test_forget_cluster_node(self):
