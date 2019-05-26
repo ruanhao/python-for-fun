@@ -171,8 +171,8 @@ class UnitTest(unittest.TestCase):
         run('docker exec rabbit1 rabbitmqctl force_reset')
 
 
-    def test_pulling_out_disc_node_from_cluster(self):
-        with self.subTest("Pulling out one disc node normally"):
+    def test_stopping_disc_node(self):
+        with self.subTest("Stopping one disc node"):
             self.test_creating_cluster()
             run(f'docker exec rabbit2 rabbitmqctl stop_app')
             # When the node being reset is a part of a cluster,
@@ -183,39 +183,25 @@ class UnitTest(unittest.TestCase):
             self._test_adding_new_node(i=4)
             run(f'docker exec rabbit1 rabbitmqctl await_online_nodes 3')
             self.assertIn('rabbit@rabbit4', get_running_nodes())
-
-
-        with self.subTest("Pulling out one disc node abruptly"):
-            self.test_creating_cluster()
-            run('docker stop rabbit2')
-            run('docker exec rabbit1 rabbitmqctl cluster_status')
-            self._test_basic_functions() # ok
-            self._test_adding_new_node(i=4) # ok
-            run(f'docker exec rabbit1 rabbitmqctl await_online_nodes 3')
-            self.assertIn('rabbit@rabbit4', get_running_nodes())
             run('docker exec rabbit1 rabbitmqctl cluster_status')
 
-        with self.subTest("Pulling out all disc nodes normally"):
+        with self.subTest("Stopping all disc nodes"):
             '''
-            Pull out rabbit1 and rabbit2
-            rabbit3 untouched
+            Stop rabbit1(disc) and rabbit2(disc)
+            rabbit3(ram) untouched
             '''
             self.test_creating_cluster()
             channel_at_rabbit2 = pika_channel(port=RABBIT_2_PORT)
             channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)
             queue_at_rabbit2 = pika_queue_declare(channel_at_rabbit2, '')
             queue_at_rabbit3 = pika_queue_declare(channel_at_rabbit3, '')
-            pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit2, 'hello')
-
-            self.assertEqual(pika_basic_get(channel_at_rabbit3, queue_at_rabbit2), 'hello')
             pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit3, "message sent before")
-
 
             run('docker exec rabbit1 rabbitmqctl stop_app')
             run('docker exec rabbit1 rabbitmqctl reset')  # reset disc node rabbit@rabbit1
             run('docker exec rabbit2 rabbitmqctl stop_app')
             self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (0, 1))
-
+            self.assertFalse(channel_at_rabbit3.is_closed)
             another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
             # can retrieve msg sent before
             self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
@@ -223,7 +209,6 @@ class UnitTest(unittest.TestCase):
                 pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit2)
             self.assertIn(f"no queue '{queue_at_rabbit2}'", raised_exception.exception.reply_text)  # queue not available
             self.assertEqual(raised_exception.exception.reply_code, 404)
-
 
             self._test_basic_functions(port=RABBIT_3_PORT)
             self._test_adding_new_node(i=4, target_node='rabbit@rabbit3')  # ok to add ram node
@@ -241,36 +226,7 @@ class UnitTest(unittest.TestCase):
             self._test_adding_new_node(i=6, target_node='rabbit@rabbit3', node_type='disc') # ok to add disc node
             self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (1, 2))
 
-
-        with self.subTest("Pulling out all disc nodes abruptly"):
-            '''
-            Pull out rabbit1 and rabbit2
-            rabbit3 untouched
-            '''
-            self.test_creating_cluster()
-            channel_at_rabbit2 = pika_channel(port=RABBIT_2_PORT)
-            channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)
-            queue_at_rabbit2 = pika_queue_declare(channel_at_rabbit2, '')
-            queue_at_rabbit3 = pika_queue_declare(channel_at_rabbit3, '')
-            pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit2, 'hello')
-            self.assertEqual(pika_basic_get(channel_at_rabbit3, queue_at_rabbit2), 'hello')
-            pika_simple_publish(channel_at_rabbit2, '', queue_at_rabbit3, "message sent before")
-
-            run('docker stop rabbit1')
-            self._test_basic_functions(port=RABBIT_3_PORT)
-            self._test_adding_new_node(i=4, target_node='rabbit@rabbit3')  # ok to add ram node
-            self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (1, 2))
-
-            run('docker stop rabbit2')
-            self._test_basic_functions(port=RABBIT_3_PORT)
-            self._test_adding_new_node(i=5, target_node='rabbit@rabbit3')  # ok to add ram node
-            self._test_adding_new_node(i=6, target_node='rabbit@rabbit3', node_type='disc')  # ok to add ram node
-            self.assertEqual(get_running_nodes_types(RABBIT_3_MANAGEMENT_PORT), (1, 3))
-
-            another_channel_at_rabbit3 = pika_channel(port=RABBIT_3_PORT)  # still can connect to cluster
-            self.assertEqual(pika_basic_get(another_channel_at_rabbit3, queue_at_rabbit3), 'message sent before')
-
-    def test_rejoining_order(self):
+    def test_restarting(self):
         with self.subTest("Restarting ram node first"):
             self._test_creating_cluster()
             self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
@@ -283,7 +239,6 @@ class UnitTest(unittest.TestCase):
             time.sleep(3)
             stdout = run('docker ps --format="{{.Names}}"')[0]
             self.assertNotIn('rabbit3', stdout)                # vm is also down
-
 
         with self.subTest("Restarting disc node (not last stopped disc)"):
             self._test_creating_cluster()
@@ -298,7 +253,6 @@ class UnitTest(unittest.TestCase):
             run("docker exec rabbit2 rabbitmqctl start_app")
             run("docker exec rabbit3 rabbitmqctl start_app")
             self.assertEqual(get_running_nodes_types(), (2, 1))  # 2 disc, 1 ram
-
 
         with self.subTest("Restarting disc node (last stopped disc)"):
             self._test_creating_cluster()
@@ -781,8 +735,6 @@ class UnitTest(unittest.TestCase):
             run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit4']} sudo iptables -F # rabbit4")
             time.sleep(10)
             self.assertEqual(len(get_running_nodes(host=ips['rabbit1'])), 4)
-
-
 
 
     def test_forget_cluster_node(self):
