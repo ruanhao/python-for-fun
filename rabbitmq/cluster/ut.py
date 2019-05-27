@@ -14,6 +14,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from troposphere import Output, Template, Ref, GetAtt
 from aws_utils import *
 from rabbitmq_utils import *
+import pika
 
 SSH_OPTIONS = "-o StrictHostKeyChecking=no -o LogLevel=ERROR"
 QUEUE_INFOS = 'name pid slave_pids synchronised_slave_pids'
@@ -847,6 +848,47 @@ class UnitTest(unittest.TestCase):
         可以使用 rabbitmqctl cancel_sync_queue 取消队列镜像同步的操作。
         '''
         pass
+
+    def test_consumer_cancellation_when_master_failed(self):
+        '''
+        Consumers that have requested to be notified when master queue fails over will be notified of cancellation.
+        '''
+        self._test_creating_cluster()
+        run("""docker exec rabbit1 rabbitmqctl set_policy --priority 0 --apply-to queues pl '.*' '{"ha-mode": "all"}'""")
+        channel1 = pika_channel(port=RABBIT_1_PORT)
+        channel2 = pika_channel(port=RABBIT_2_PORT)
+        channel3 = pika_channel(port=RABBIT_3_PORT)
+        queue1 = pika_queue_declare(channel1, "queue1", durable=True)
+
+        cancellation_notificaton_on_rabbht2 = None
+        cancellation_notificaton_on_rabbht3 = None
+
+        def worker1(method):
+            nonlocal cancellation_notificaton_on_rabbht2
+            cancellation_notificaton_on_rabbht2 = method
+
+        def worker2(method):
+            nonlocal cancellation_notificaton_on_rabbht3
+            cancellation_notificaton_on_rabbht3 = method
+
+        channel2.add_on_cancel_callback(worker1)
+        channel3.add_on_cancel_callback(worker2)
+        pika_consume(channel2, queue1, pika_simple_callback, arguments={'x-cancel-on-ha-failover': True})
+        pika_consume(channel3, queue1, pika_simple_callback)
+
+        threading.Thread(target=lambda: channel2.start_consuming(), daemon=True).start()
+        threading.Thread(target=lambda: channel3.start_consuming(), daemon=True).start()
+
+        run('docker exec rabbit1 rabbitmqctl stop_app')
+
+        self.assertIsNone(cancellation_notificaton_on_rabbht3)
+        self.assertIsNotNone(cancellation_notificaton_on_rabbht2)
+        self.assertIsInstance(cancellation_notificaton_on_rabbht2.method, pika.spec.Basic.Cancel)
+
+
+
+
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
