@@ -1030,6 +1030,36 @@ class UnitTest(unittest.TestCase):
             self.assertIn(queue1_info['node'], ['rabbit@rabbit2', 'rabbit@rabbit3'])
             run('docker exec rabbit2 rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t')
 
+    def test_restarting_with_ha(self):
+        '''
+        镜像队列中最后一个停止的节点会是 master ，启动顺序必须是 master 先启动。
+        如果 slave 先启动，它会有 300 秒的等待时间，等待 master 启动，然后加入到集群。
+        如果 300 秒内 master 没有启动，slave 会自动停止。
+
+        当所有节点因为断电同时离线时，每个节点都认为自己不是最后一个停止的节点，要恢复镜像队列，需要在 300 秒内启动所有节点。
+        '''
+        self._test_creating_cluster()
+        run("""docker exec rabbit1 rabbitmqctl set_policy --priority 0 --apply-to queues pl '.*' '{"ha-mode": "all"}'""")
+        channel1 = pika_channel(port=RABBIT_1_PORT)
+        queue1 = pika_queue_declare(channel1, "queue1", durable=True)
+        for node in ['rabbit3', 'rabbit2', 'rabbit1']:
+            run(f'docker exec {node} rabbitmqctl stop_app')
+
+        with self.assertRaises(TimeoutExpired):
+            run("docker exec rabbit2 rabbitmqctl start_app", timeout=30)
+        with self.assertRaises(TimeoutExpired):
+            run("docker exec rabbit3 rabbitmqctl start_app", timeout=30)
+        run("docker logs rabbit2 | tail")
+        run("docker logs rabbit3 | tail")
+        run("docker exec rabbit1 rabbitmqctl start_app")
+        time.sleep(5)
+        self.assertEqual(len(get_running_nodes()), 3)
+
+
+
+
+
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
