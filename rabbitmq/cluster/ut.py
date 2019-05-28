@@ -741,6 +741,13 @@ class UnitTest(unittest.TestCase):
     def test_forget_cluster_node(self):
         '''
         如果最后一个关闭的节点永久丢失了，可以使用 rabbitmqctl forget_cluster_node 命令（优先于 force_boot ），因为它可以确保镜像队列的正常运转。
+
+        'forget_cluster_node --offline' will ensure that mirrored queues which were mastered on the lost node get promoted.
+
+        It's important to understand that RabbitMQ can only promote STOPPED mirrors during forget_cluster_node,
+        since any mirrors that are started again will clear out their contents.
+        Therefore when removing a lost master in a stopped cluster, you must invoke rabbitmqctl forget_cluster_node BEFORE starting mirrors again.
+
         使用 forget_cluster_node 命令的话，需要删除的节点必须是 offline ，执行命令的节点必须 online ，（否则需要指定 --offline 参数）。
         注意：如果指定执行命令的节点为 --offline ，意味着不能存在 Erlang node ，因为 rabbitmqctl 需要 mock 一个同名的 node 。
         '''
