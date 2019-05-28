@@ -942,39 +942,37 @@ class UnitTest(unittest.TestCase):
                 self.assertIsNone(pika_basic_get(channel2, queue1))
             self.assertIn("NOT_FOUND", raised_exception.exception.reply_text)
 
+
         with self.subTest("ha-promote-on-shutdown is when-synced and node is uncontrolly shutdown"):
             '''
             An uncontrolled master shutdown (i.e. server or node crash, or network outage)
             will still trigger a promotion of an unsynchronised mirror.
             '''
-            ips, snames = self._test_creating_cluster_on_aws()
-            run(f"""ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} 'sudo rabbitmqctl set_policy --priority 0 --apply-to queues pl ".*" "{{\\"ha-mode\\": \\"all\\", \\"ha-promote-on-shutdown\\": \\"when-synced\\"}}"'""")
-            channel1 = pika_channel(ips['rabbit1'])
+            self._test_creating_cluster()
+            run("""docker exec rabbit1 rabbitmqctl set_policy --priority 0 --apply-to queues pl '.*' '{"ha-mode": "all", "ha-promote-on-shutdown": "when-synced"}'""")
+            channel1 = pika_channel(port=RABBIT_1_PORT)
             queue1 = pika_queue_declare(channel1, "queue1", durable=True)
-            for i in range(3, 0, -1):
-                node = f'rabbit{i}'
-                ip = ips[node]
-                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl stop_app # {node}")
+            run('docker exec rabbit1 rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t')
+            for sname in ['rabbit3', 'rabbit2', 'rabbit1']:
+                run(f'docker exec {sname} rabbitmqctl stop_app')
 
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl start_app # rabbit1")
-            channel1 = pika_channel(ips['rabbit1'])
+            run('docker exec rabbit1 rabbitmqctl start_app')
+            channel1 = pika_channel(port=RABBIT_1_PORT)
             pika_simple_publish(channel1, '', queue1, 'new message')  # mock unsync queues
-            for i in [2, 3]:
-                node = f'rabbit{i}'
-                ip = ips[node]
-                run(f"ssh {SSH_OPTIONS} ec2-user@{ip} sudo rabbitmqctl start_app # {node}")
 
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t")
-            queue1_info = get_queue_info(queue1, host=ips['rabbit1'])
+            for sname in ['rabbit2', 'rabbit3']:
+                run(f'docker exec {sname} rabbitmqctl start_app')
+
+            run('docker exec rabbit1 rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t')
+            time.sleep(5)
+            queue1_info = get_queue_info(queue1)
             self.assertEqual(queue1_info['synchronised_slave_nodes'], [], queue1_info)
-            print("Mock network failure ...")
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo iptables -A INPUT -p tcp --dport 25672 -j DROP # rabbit1")
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo iptables -A OUTPUT -p tcp --dport 25672 -j DROP # rabbit1")
+            run(f'docker network disconnect {DOCKER_NETWORK} rabbit1')
             time.sleep(90)
 
-            queue1_info = get_queue_info(queue1, host=ips['rabbit2'])
-            self.assertIn(queue1_info['node'], [f'rabbit@{snames["rabbit2"]}', f'rabbit@{snames["rabbit3"]}'])
-            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t")
+            queue1_info = get_queue_info(queue1, port=RABBIT_2_MANAGEMENT_PORT)
+            self.assertIn(queue1_info['node'], ['rabbit@rabbit2', 'rabbit@rabbit3'])
+            run('docker exec rabbit2 rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t')
 
 
 if __name__ == '__main__':
