@@ -847,7 +847,30 @@ class UnitTest(unittest.TestCase):
 
         可以使用 rabbitmqctl cancel_sync_queue 取消队列镜像同步的操作。
         '''
-        pass
+        self._test_creating_cluster()
+        run("""docker exec rabbit1 rabbitmqctl set_policy --priority 0 --apply-to queues pl '.*' '{"ha-mode": "all"}'""")
+        channel1 = pika_channel(port=RABBIT_1_PORT)
+        queue1 = pika_queue_declare(channel1, "queue1", durable=True)
+        run('docker exec rabbit1 rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t')
+        for sname in ['rabbit3', 'rabbit2', 'rabbit1']:
+            run(f'docker exec {sname} rabbitmqctl stop_app')
+            run('docker exec rabbit1 rabbitmqctl start_app')
+            channel1 = pika_channel(port=RABBIT_1_PORT)
+            pika_simple_publish(channel1, '', queue1, 'new message')  # mock unsync queues
+
+        for sname in ['rabbit2', 'rabbit3']:
+            run(f'docker exec {sname} rabbitmqctl start_app')
+
+        run('docker exec rabbit1 rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t')
+        time.sleep(5)
+        queue1_info = get_queue_info(queue1)
+        self.assertEqual(queue1_info['synchronised_slave_nodes'], [])
+        run(f'docker exec rabbit1 rabbitmqctl sync_queue {queue1}')
+        time.sleep(5)
+        queue1_info = get_queue_info(queue1)
+        self.assertEqual(len(queue1_info['synchronised_slave_nodes']), 2)
+        run('docker exec rabbit1 rabbitmqctl list_queues name pid slave_pids synchronised_slave_pids | column -t')
+
 
     def test_consumer_cancellation_when_master_failed(self):
         '''
