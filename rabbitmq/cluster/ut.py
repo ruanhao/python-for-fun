@@ -781,6 +781,77 @@ class UnitTest(unittest.TestCase):
             self.assertEqual(get_running_nodes_types(host=ips['rabbit2']), (1, 1))
             run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo rabbitmqctl cluster_status # on rabbit2")
 
+        with self.subTest("Using force_boot when HA"):
+            ips, snames = self._test_creating_cluster_on_aws(3, [3])
+            self.assertEqual(get_running_nodes_types(host=ips['rabbit1']), (2, 1))  # rabbit1 and rabbit3 are disc
+            run(f"""ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} 'sudo rabbitmqctl set_policy --priority 0 --apply-to queues pl ".*" "{{\\"ha-mode\\": \\"all\\"}}"'""")
+
+            for node, ip in ips.items():
+                channel = pika_channel(host=ip)
+                pika_queue_declare(channel, f'{node}-queue', durable=True)
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
+
+            for i in range(1, 4):
+                node = f'rabbit{i}'
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ips[node]} sudo systemctl stop rabbitmq-server # on {node}")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl force_boot # forget rabbit3 (on rabbit1)")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo systemctl start rabbitmq-server # on rabbit1")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # on rabbit1")
+
+            # rabbit3-queue 的 master 仍然显示位于 rabbit3 上，但是已无法访问
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
+            self.assertIsNone(get_queue_info("rabbit3-queue", ips['rabbit1']))
+            self.assertIsNone(get_queue_info("rabbit2-queue", ips['rabbit1']))
+            # slave queue DOWN
+            self.assertEqual(get_queue_info("rabbit1-queue", ips['rabbit1'])['slave_nodes'], [])
+
+            channel1 = pika_channel(host=ips['rabbit1'])
+            pika_simple_publish(channel1, '', 'rabbit3-queue', 'msg')  # can still publish, but no use
+            with self.assertRaises(Exception) as raised_exception:
+                pika_basic_get(channel1, 'rabbit3-queue')
+            self.assertIn("NOT_FOUND", raised_exception.exception.reply_text)
+
+
+        with self.subTest("Using forget_cluster_node when HA"):
+            ips, snames = self._test_creating_cluster_on_aws(3, [3])
+            self.assertEqual(get_running_nodes_types(host=ips['rabbit1']), (2, 1))  # rabbit1 and rabbit3 are disc
+            run(f"""ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} 'sudo rabbitmqctl set_policy --priority 0 --apply-to queues pl ".*" "{{\\"ha-mode\\": \\"all\\"}}"'""")
+
+            for node, ip in ips.items():
+                channel = pika_channel(host=ip)
+                pika_queue_declare(channel, f'{node}-queue', durable=True)
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids synchronised_slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
+            time.sleep(3)
+            candidate_node = get_queue_info('rabbit3-queue', ips['rabbit1'])['synchronised_slave_nodes'][0]
+            self.assertIsNotNone(candidate_node)
+            print(f'candidate: {candidate_node}')
+
+            for i in range(1, 4):
+                node = f'rabbit{i}'
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ips[node]} sudo systemctl stop rabbitmq-server # on {node}")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl forget_cluster_node --offline rabbit@{snames['rabbit3']} # forget rabbit3 (on rabbit1)")
+
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo systemctl start rabbitmq-server # on rabbit1")
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl cluster_status # on rabbit1")
+
+            # rabbit3-queue 的 master 由 rabbit1 接管
+            run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit1']} sudo rabbitmqctl list_queues -q name pid slave_pids | column -t # rabbit1", translation=reverse_dict(snames))
+            if candidate_node == f'rabbit@{snames["rabbit1"]}':
+                print("candidate_node is rabbit1")
+                self.assertEqual(get_queue_info("rabbit3-queue", ips['rabbit1'])['node'], f'rabbit@{snames["rabbit1"]}')
+            else:               # rabbit2
+                print("candidate_node is rabbit2")
+                self.assertIsNone(get_queue_info("rabbit3-queue", ips['rabbit1']))
+                run(f"ssh {SSH_OPTIONS} ec2-user@{ips['rabbit2']} sudo systemctl start rabbitmq-server # on rabbit2")
+                self.assertEqual(get_queue_info("rabbit3-queue", ips['rabbit1'])['node'], f'rabbit@{snames["rabbit2"]}')
+
+
+
 
 
     def test_update_cluster_nodes(self):
