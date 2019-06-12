@@ -116,35 +116,35 @@ class UnitTest(unittest.TestCase):
 
 
     def test_index_properties(self):
-        # with self.subTest("Expire Documents after a Specified Number of Seconds"):
-        #     collection = db['ttl.seconds']
-        #     collection.drop()
-        #     collection.insert_many([
-        #         {'lastModifiedDate': datetime.datetime.utcnow()},
-        #         {'lastModifiedDate': datetime.datetime.utcnow()},
-        #         {'lastModifiedDate': datetime.datetime.utcnow()},
-        #     ])
-        #     ###
-        #     collection.create_index([('lastModifiedDate', pymongo.ASCENDING)], expireAfterSeconds=3)
-        #     time.sleep(60)      # The background task that removes expired documents runs every 60 seconds
-        #     self.assertEqual(list(collection.find({})), [])
+        with self.subTest("Expire Documents after a Specified Number of Seconds"):
+            collection = db['ttl.seconds']
+            collection.drop()
+            collection.insert_many([
+                {'lastModifiedDate': datetime.datetime.utcnow()},
+                {'lastModifiedDate': datetime.datetime.utcnow()},
+                {'lastModifiedDate': datetime.datetime.utcnow()},
+            ])
+            ###
+            collection.create_index([('lastModifiedDate', pymongo.ASCENDING)], expireAfterSeconds=3)
+            time.sleep(60)      # The background task that removes expired documents runs every 60 seconds
+            self.assertEqual(list(collection.find({})), [])
 
 
-        # with self.subTest("Expire Documents at a Specific Clock Time"):
-        #     collection = db['ttl.specific']
-        #     collection.drop()
-        #     diff = datetime.timedelta(seconds=3)
-        #     collection.insert_many([
-        #         {'expireAt': datetime.datetime.utcnow() + diff},
-        #         {'expireAt': datetime.datetime.utcnow() + diff},
-        #         {'expireAt': datetime.datetime.utcnow() + diff},
-        #         {'expireAt': datetime.datetime.utcnow() - diff},
-        #     ])
-        #     ###
-        #     self.assertEqual(len(list(collection.find({}))), 4)
-        #     collection.create_index([('expireAt', pymongo.ASCENDING)], expireAfterSeconds=0)
-        #     time.sleep(60)
-        #     self.assertEqual(list(collection.find({})), [])
+        with self.subTest("Expire Documents at a Specific Clock Time"):
+            collection = db['ttl.specific']
+            collection.drop()
+            diff = datetime.timedelta(seconds=3)
+            collection.insert_many([
+                {'expireAt': datetime.datetime.utcnow() + diff},
+                {'expireAt': datetime.datetime.utcnow() + diff},
+                {'expireAt': datetime.datetime.utcnow() + diff},
+                {'expireAt': datetime.datetime.utcnow() - diff},
+            ])
+            ###
+            self.assertEqual(len(list(collection.find({}))), 4)
+            collection.create_index([('expireAt', pymongo.ASCENDING)], expireAfterSeconds=0)
+            time.sleep(60)
+            self.assertEqual(list(collection.find({})), [])
 
         with self.subTest("Unique Index"):
             collection = db['uniq.students']
