@@ -23,19 +23,5 @@ class UnitTest(unittest.TestCase):
         create_replica_set()
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == '__main__':
     unittest.main(verbosity=2)

@@ -78,11 +78,22 @@ def create_replica_set(replicas=3):
     run('docker stop `docker ps --format="{{.Names}}" | grep mongo`', True)
     run(f'docker network rm {DOCKER_NETWORK}', True)
     run(f'docker network create {DOCKER_NETWORK}')
+    replica_set_name = f'rs{replicas}'
+    config = {'_id': replica_set_name, 'members': []}
     for i in range(0, replicas):
         hostname = f'mongo{i}'
-        replica_ops = f'--replSet myrs --bind_ip localhost,{hostname}'
-        run(f'docker run --privileged --rm -d --network {DOCKER_NETWORK} --hostname {hostname} --name {hostname} -p {27017+i}:27017 mongo:{MONGO_VERSION} {replica_ops}')
-
-    time.sleep(5)               # wait for all mongodbs started
-    run("""docker exec mongo0 mongo --quiet --eval 'rs.initiate({_id: "myrs", members:[{_id: 0, host: "mongo0:27017", priority: 99}, {_id: 1, host: "mongo1:27017"}, {_id: 2, host: "mongo2:27017"}]})'""")
-    _wait_until(lambda: run("""mongo --quiet --eval 'rs.status()["members"][0].stateStr'""")[0], 'PRIMARY')
+        replica_ops = f'--replSet {replica_set_name} --bind_ip localhost,{hostname}'
+        mapping_port = 27017 + i
+        run(f'docker run --rm -d --network {DOCKER_NETWORK} --hostname {hostname} --name {hostname} -p {mapping_port}:27017 mongo:{MONGO_VERSION} {replica_ops}')
+        if i == 0:              # master
+            master = MongoClient('localhost', mapping_port)
+            master.server_info()  # ensure beging started
+            config['members'].append({'_id': i, 'host': f'{hostname}:27017', 'priority': 99})
+        else:
+            MongoClient('localhost', mapping_port).server_info()  # ensure beging started
+            config['members'].append({'_id': i, 'host': f'{hostname}:27017'})
+    master.admin.command("replSetInitiate", config)
+    # run("""docker exec mongo0 mongo --quiet --eval 'rs.initiate({_id: replica_set_name, members:[{_id: 0, host: "mongo0:27017", priority: 99}, {_id: 1, host: "mongo1:27017"}, {_id: 2, host: "mongo2:27017"}]})'""")
+    # _wait_until(lambda: run("""mongo --quiet --eval 'rs.status()["members"][0].stateStr'""")[0], 'PRIMARY')
+    _wait_until(lambda: master.is_primary, True)
+    return replica_set_name
