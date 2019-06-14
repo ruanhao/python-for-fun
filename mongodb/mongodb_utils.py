@@ -59,6 +59,7 @@ def get_client(host='localhost', port=27017):
 
 def get_rs_client(*hosts, rs='rs0'):
     url = f'mongodb://{",".join(hosts)}/?replicaSet={rs}'
+    print(url)
     return MongoClient(url)
 
 
@@ -84,7 +85,7 @@ def key_find(lst, key, value):
     return next((item for item in lst if item[key] == value), None)
 
 
-def _wait_until(func, expect, desc=None, delay=3, tries=10):
+def wait_until(func, expect, desc=None, delay=3, tries=10):
     while tries >= 0:
         actual = func()
         if actual == expect:
@@ -113,8 +114,8 @@ def create_replica_set(replicas=3):
             config['members'].append({'_id': i, 'host': f'{hostname}:27017'})
     master.admin.command("replSetInitiate", config)
     # run("""docker exec mongo0 mongo --quiet --eval 'rs.initiate({_id: replica_set_name, members:[{_id: 0, host: "mongo0:27017", priority: 99}, {_id: 1, host: "mongo1:27017"}, {_id: 2, host: "mongo2:27017"}]})'""")
-    # _wait_until(lambda: run("""mongo --quiet --eval 'rs.status()["members"][0].stateStr'""")[0], 'PRIMARY')
-    _wait_until(lambda: master.is_primary, True)
+    # wait_until(lambda: run("""mongo --quiet --eval 'rs.status()["members"][0].stateStr'""")[0], 'PRIMARY')
+    wait_until(lambda: master.is_primary, True)
     return replica_set_name
 
 
@@ -129,6 +130,7 @@ def create_replica_set_on_aws(replicas=3):
 
     t.add_output([Output(f'PublicIp{i}', Value=GetAtt(f"Mongo{i}", "PublicIp")) for i in range(0, replicas)])
     t.add_output([Output(f'PublicDnsName{i}', Value=GetAtt(f"Mongo{i}", "PublicDnsName")) for i in range(0, replicas)])
+    t.add_output([Output(f'PrivateIp{i}', Value=GetAtt(f"Mongo{i}", "PrivateIp")) for i in range(0, replicas)])
 
     dump_template(t, True)
     cf_client.create_stack(
@@ -143,7 +145,8 @@ def create_replica_set_on_aws(replicas=3):
         node = f'mongo{i}'
         public_ip = key_find(outputs, 'OutputKey', f'PublicIp{i}')['OutputValue']
         public_dns = key_find(outputs, 'OutputKey', f'PublicDnsName{i}')['OutputValue']
-        rs_info[node] = {'ip': public_ip, 'dns': public_dns}
+        private_ip = key_find(outputs, 'OutputKey', f'PrivateIp{i}')['OutputValue']
+        rs_info[node] = {'ip': public_ip, 'dns': public_dns, 'private_ip': private_ip}
 
     config = {
         '_id': 'rs0',
@@ -153,6 +156,6 @@ def create_replica_set_on_aws(replicas=3):
     print("Replica set on AWS initiated:")
     pprint(rs_info)
     c = get_rs_client(*[info['dns'] for _, info in rs_info.items()])
-    _wait_until(lambda: c.primary is not None, True)
+    wait_until(lambda: c.primary is not None, True)
     print(f'Primary: {c.primary}')
     return c, rs_info
