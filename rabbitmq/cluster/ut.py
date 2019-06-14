@@ -115,7 +115,7 @@ class UnitTest(unittest.TestCase):
         )
         cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
         outputs = cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs']
-        time.sleep(10)           # wait for ssh servce starting up
+        time.sleep(10)           # wait for ssh service starting up
         ips = {}
         snames = {}
         for i in range(1, instance_num+1):

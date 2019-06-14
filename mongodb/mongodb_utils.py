@@ -8,11 +8,25 @@ import time
 import uuid
 import subprocess
 import sys
+from pprint import pprint
 from pymongo import MongoClient
 from bson import json_util
+import boto3
+from troposphere import Tags, Ref
+from troposphere.ec2 import SecurityGroup, SecurityGroupRule, NetworkInterfaceProperty, Instance
+from troposphere import Output, Template, Ref, GetAtt
+
+from aws_utils import ts_add_instance_with_public_ip
+from aws_utils import ts_add_security_group
+from aws_utils import init_cf_env
+from aws_utils import dump_template
+from aws_utils import cf_client
+
 
 DOCKER_NETWORK = 'mongo-replica-set'
 MONGO_VERSION = '4.1.11'
+
+AMI = 'ami-0c827dd4b5ccc3790'
 
 
 def run(script, quiet=False, timeout=60, translation=None):
@@ -42,6 +56,11 @@ def run(script, quiet=False, timeout=60, translation=None):
 
 def get_client(host='localhost', port=27017):
     return MongoClient(host, port)
+
+def get_rs_client(*hosts, rs='rs0'):
+    url = f'mongodb://{",".join(hosts)}/?replicaSet={rs}'
+    return MongoClient(url)
+
 
 def new_collection(db, cname):
     c = db[cname]
@@ -97,3 +116,43 @@ def create_replica_set(replicas=3):
     # _wait_until(lambda: run("""mongo --quiet --eval 'rs.status()["members"][0].stateStr'""")[0], 'PRIMARY')
     _wait_until(lambda: master.is_primary, True)
     return replica_set_name
+
+
+def create_replica_set_on_aws(replicas=3):
+    test_stack_name = 'TestMongoDbReplSet'
+    init_cf_env(test_stack_name)
+    ###
+    t = Template()
+    sg = ts_add_security_group(t)
+    for i in range(0, replicas):
+        ts_add_instance_with_public_ip(t, Ref(sg), name=f"Mongo{i}", image_id=AMI, tag='mongo')
+
+    t.add_output([Output(f'PublicIp{i}', Value=GetAtt(f"Mongo{i}", "PublicIp")) for i in range(0, replicas)])
+    t.add_output([Output(f'PublicDnsName{i}', Value=GetAtt(f"Mongo{i}", "PublicDnsName")) for i in range(0, replicas)])
+
+    dump_template(t, True)
+    cf_client.create_stack(
+        StackName=test_stack_name,
+        TemplateBody=t.to_yaml(),
+    )
+    cf_client.get_waiter('stack_create_complete').wait(StackName=test_stack_name)
+    outputs = cf_client.describe_stacks(StackName=test_stack_name)['Stacks'][0]['Outputs']
+    time.sleep(10)           # wait for ssh service starting up
+    rs_info = {}
+    for i in range(0, replicas):
+        node = f'mongo{i}'
+        public_ip = key_find(outputs, 'OutputKey', f'PublicIp{i}')['OutputValue']
+        public_dns = key_find(outputs, 'OutputKey', f'PublicDnsName{i}')['OutputValue']
+        rs_info[node] = {'ip': public_ip, 'dns': public_dns}
+
+    config = {
+        '_id': 'rs0',
+        'members': [{'_id': idx, 'host': info['dns']} for idx, (node, info) in enumerate(rs_info.items())]
+    }
+    MongoClient(public_ip, 27017).admin.command("replSetInitiate", config)
+    print("Replica set on AWS initiated:")
+    pprint(rs_info)
+    c = get_rs_client(*[info['dns'] for _, info in rs_info.items()])
+    _wait_until(lambda: c.primary is not None, True)
+    print(f'Primary: {c.primary}')
+    return c, rs_info

@@ -23,5 +23,14 @@ class UnitTest(unittest.TestCase):
         create_replica_set()
 
 
+    def test_creating_replica_set_on_aws(self):
+        c, rs_info = create_replica_set_on_aws()
+        ts = datetime.datetime.now().timestamp()
+        c.testdb.testcol.insert({"a": 1, 'ts': ts})
+        d = c.testdb.testcol.find_one({'a': 1})
+        self.assertEqual(d['ts'], ts)
+
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
