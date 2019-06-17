@@ -4,6 +4,7 @@
 import re
 import json
 import pymongo
+import datetime
 import time
 import uuid
 import subprocess
@@ -31,7 +32,7 @@ AMI = 'ami-0c827dd4b5ccc3790'
 
 def run(script, quiet=False, timeout=60, translation=None):
     if quiet is False:
-        print(f"====== {script} ======")
+        print(f"=> {script}")
     proc = subprocess.Popen(['bash', '-c', script],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.PIPE)
@@ -59,7 +60,7 @@ def get_client(host='localhost', port=27017):
 
 def get_rs_client(*hosts, rs='rs0'):
     url = f'mongodb://{",".join(hosts)}/?replicaSet={rs}'
-    print(url)
+    # print(url)
     return MongoClient(url)
 
 
@@ -75,6 +76,8 @@ def timeit(callable):
     return end - begin
 
 
+def ts():
+    print(datetime.datetime.now())
 
 
 
@@ -159,3 +162,56 @@ def create_replica_set_on_aws(replicas=3):
     wait_until(lambda: c.primary is not None, True)
     print(f'Primary: {c.primary}')
     return c, rs_info
+
+
+def mock_network_partition(rs_info, target=None, incoming=False, outcoming=False):
+    '''
+    rs_info = {
+      'mongo0': {
+        'ip': "xxx",
+        'dns': "xxx",
+        'private_ip': "xxx",
+      }
+    }
+
+    target = [ip|private_ip|dns]
+    '''
+    if target is None:          # default is master
+        c = get_rs_client(*[info['dns'] for _, info in rs_info.items()])
+        wait_until(lambda: c.primary is not None, True)
+        target, _port = c.primary
+
+    target_node = None
+    for node, info in rs_info.items():
+        if info['ip'] == target or info['private_ip'] == target or info['dns'] == target:
+            target_node = node
+
+    assert target_node is not None
+
+    target_node_ip = rs_info[target_node]['ip']
+
+    ips = []
+    for node, info in rs_info.items():
+        if node != target_node:
+            ips.append(info['private_ip'])
+            ips.append(info['ip'])
+    if incoming is False:
+        run(f"ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@{target_node_ip} sudo iptables -I INPUT  -s {','.join(ips)} -j DROP")
+    if outcoming is False:
+        run(f"ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@{target_node_ip} sudo iptables -I OUTPUT -d {','.join(ips)} -j DROP")
+
+def mock_network_partition_recovery(rs_info, target=None):
+    if target is None:          # default is master
+        c = get_rs_client(*[info['dns'] for _, info in rs_info.items()])
+        wait_until(lambda: c.primary is not None, True)
+        target, _port = c.primary
+
+    target_node = None
+    for node, info in rs_info.items():
+        if info['ip'] == target or info['private_ip'] == target or info['dns'] == target:
+            target_node = node
+
+    assert target_node is not None
+
+    target_node_ip = rs_info[target_node]['ip']
+    run(f"ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@{target_node_ip} sudo iptables -F") # network recovery

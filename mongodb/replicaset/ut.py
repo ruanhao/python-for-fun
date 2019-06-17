@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import threading
 import random
 import unittest
 import datetime
@@ -8,6 +9,9 @@ import time
 import warnings
 import pymongo
 from pprint import pprint
+from pymongo.read_concern import ReadConcern
+from pymongo.write_concern import WriteConcern
+from pymongo.read_preferences import Primary
 from mongodb_utils import *
 
 SSH_OPTIONS = "-o StrictHostKeyChecking=no -o LogLevel=ERROR"
@@ -17,7 +21,6 @@ class UnitTest(unittest.TestCase):
     def setUp(self):
         warnings.filterwarnings("ignore", category=ResourceWarning, message="unclosed.*")
         warnings.filterwarnings("ignore", category=ResourceWarning, message="subprocess.*")
-
 
     def test_creating_replica_set(self):
         create_replica_set()
@@ -84,6 +87,61 @@ class UnitTest(unittest.TestCase):
                                        f'{orig_primary_dns}:27017')
         self.assertEqual(orig_primary_member_after_recovery['stateStr'], 'SECONDARY')  # origin primary is now secondary
         self.assertEqual(client_using_orig_primary.testdb.testcol.count_documents({}), 2)  # data synchronised
+
+
+
+    def test_read_concern(self):
+        with self.subTest("linearizable"):
+            '''
+            The query may wait for concurrently executing writes to
+            propagate to a majority of replica set members before returning results.
+
+            Combined with "majority" write concern, "linearizable" read concern enables multiple threads to
+            perform reads and writes on a single document
+            as if a single thread performed these operations in real time;
+            that is, the corresponding schedule for these reads and writes is considered linearizable.
+            '''
+            rs_client, rs_info = create_replica_set_on_aws()
+            self.assertIsInstance(rs_client.read_preference, Primary)  # You can specify linearizable read concern for read operations on the primary ONLY.
+
+            testcol = rs_client.testdb.get_collection('testcol',
+                                                      write_concern=WriteConcern(w='majority', wtimeout=30000, j=True),
+                                                      read_concern=ReadConcern('linearizable'))
+            testcol.insert_one({'a': 2})
+            mock_network_partition(rs_info, incoming=True)
+            threading.Thread(target=lambda: testcol.insert_one({'a': 1}), daemon=True).start()
+
+            # Linearizable read concern guarantees ONLY apply if read operations specify a query filter
+            # that uniquely identifies a single document.
+            testcol.find({}, max_time_ms=5000)  # max_time_ms not in effect
+            with self.assertRaises(pymongo.errors.ExecutionTimeout):
+                testcol.find_one({'a': 2}, max_time_ms=5000)
+
+
+        with self.subTest("majority"):
+            rs_client, rs_info = create_replica_set_on_aws()
+            rs_client.testdb.testcol.insert_one({'a': 1})
+            mock_network_partition(rs_info)
+            rs_client.testdb.testcol.insert_one({'a': 2})
+            testcol2 = rs_client.testdb.get_collection('testcol', read_concern=ReadConcern('majority'))
+            self.assertEqual(testcol2.count_documents({}), 1)
+            time.sleep(30)
+            mock_network_partition_recovery(rs_info)
+            time.sleep(30)
+            self.assertEqual(rs_client.testdb.testcol.count_documents({}), 1)  # rollbacked
+            self.assertEqual(rs_client.testdb.testcol.find_one()['a'], 1)
+
+
+        with self.subTest("local"):
+            rs_client, rs_info = create_replica_set_on_aws()
+            mock_network_partition(rs_info)
+            rs_client.testdb.testcol.insert_one({'a': 1})
+            self.assertEqual(rs_client.testdb.testcol.count_documents({}), 1)
+            time.sleep(30)
+            mock_network_partition_recovery(rs_info)
+            time.sleep(30)
+            self.assertEqual(rs_client.testdb.testcol.count_documents({}), 0)  # rollbacked
+
 
 
 
