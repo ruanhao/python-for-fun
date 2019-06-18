@@ -1,6 +1,12 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import logging
+format='%(asctime)s - %(name)s - %(levelname)-8s - %(threadName)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=format)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 import threading
 import random
 import unittest
@@ -13,6 +19,9 @@ from pymongo.read_concern import ReadConcern
 from pymongo.write_concern import WriteConcern
 from pymongo.read_preferences import Primary
 from mongodb_utils import *
+
+
+
 
 SSH_OPTIONS = "-o StrictHostKeyChecking=no -o LogLevel=ERROR"
 
@@ -32,6 +41,24 @@ class UnitTest(unittest.TestCase):
         c.testdb.testcol.insert({"a": 1, 'ts': ts})
         d = c.testdb.testcol.find_one({'a': 1})
         self.assertEqual(d['ts'], ts)
+
+        logger.info(f'host and port current connected to: {c.testdb.client.address}')
+        primary, _ = c.primary
+        self.assertEqual(primary, c.testdb.client.address[0])
+        run(f'ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR ec2-user@{primary} sudo iptables -I INPUT -p tcp --dport 27017 -j DROP')
+        with self.assertRaises(pymongo.errors.AutoReconnect):
+            # This means that the driver was not able to connect to the old primary,
+            # it will attempt to automatically reconnect on subsequent operations.
+            c.testdb.testcol.find_one()
+        logger.info(f"New primary: {c.primary}")  # can be None now
+        # Eventually, the replica set will failover and elect a new primary (this should take no more than a couple of seconds in general).
+        # At that point the driver will connect to the new primary and the operation will succeed.
+        wait_until(lambda: c.primary is not None, True)
+        logger.info(f"New primary: {c.primary}")
+        c.testdb.testcol.find_one()  # ok again
+
+
+
 
 
     def test_network_partition(self):
@@ -101,22 +128,37 @@ class UnitTest(unittest.TestCase):
             as if a single thread performed these operations in real time;
             that is, the corresponding schedule for these reads and writes is considered linearizable.
             '''
+            ts = datetime.datetime.now().timestamp()
             rs_client, rs_info = create_replica_set_on_aws()
             self.assertIsInstance(rs_client.read_preference, Primary)  # You can specify linearizable read concern for read operations on the primary ONLY.
+            orig_primary, _ = rs_client.primary
 
             testcol = rs_client.testdb.get_collection('testcol',
-                                                      write_concern=WriteConcern(w='majority', wtimeout=30000, j=True),
+                                                      write_concern=WriteConcern(w='majority', wtimeout=5000, j=True),
                                                       read_concern=ReadConcern('linearizable'))
-            testcol.insert_one({'a': 2})
-            mock_network_partition(rs_info, incoming=True)
-            threading.Thread(target=lambda: testcol.insert_one({'a': 1}), daemon=True).start()
+
+            testcol.insert_one({'a': 123})  # without this, there will be excption below, don't know why ...
+            mock_network_partition(rs_info, incoming=True)  # allow incoming traffic here is in order to make stale primary think it is still primary for longer time
+            def worker():
+                nonlocal testcol
+                with self.assertRaises(pymongo.errors.WTimeoutError):
+                    testcol.insert_one({'a': ts})
+
+            threading.Thread(target=worker).start()
+            time.sleep(0.5)
 
             # Linearizable read concern guarantees ONLY apply if read operations specify a query filter
             # that uniquely identifies a single document.
             testcol.find({}, max_time_ms=5000)  # max_time_ms not in effect
             with self.assertRaises(pymongo.errors.ExecutionTimeout):
-                testcol.find_one({'a': 2}, max_time_ms=5000)
+                testcol.find_one({'a': ts}, max_time_ms=5000)
 
+            c = get_client(orig_primary)
+            # you can see difference between different levels below
+            self.assertIsNone(c.testdb.get_collection('testcol', read_concern=ReadConcern('majority')).find_one({'a': ts}))
+            self.assertEqual(c.testdb.get_collection('testcol', read_concern=ReadConcern('local')).find_one({'a': ts})['a'], ts)
+            self.assertTrue(c.is_primary)  # make sure it is still writable
+            wait_until(lambda: c.is_primary, False)  # it will step down eventually
 
         with self.subTest("majority"):
             rs_client, rs_info = create_replica_set_on_aws()
@@ -141,10 +183,6 @@ class UnitTest(unittest.TestCase):
             mock_network_partition_recovery(rs_info)
             time.sleep(30)
             self.assertEqual(rs_client.testdb.testcol.count_documents({}), 0)  # rollbacked
-
-
-
-
 
 
 if __name__ == '__main__':

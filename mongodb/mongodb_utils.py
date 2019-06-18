@@ -1,6 +1,12 @@
 #! /usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import logging
+format='%(asctime)s - %(name)s - %(levelname)-8s - %(threadName)s - %(message)s'
+logging.basicConfig(level=logging.INFO, format=format)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 import re
 import json
 import pymongo
@@ -32,7 +38,8 @@ AMI = 'ami-0c827dd4b5ccc3790'
 
 def run(script, quiet=False, timeout=60, translation=None):
     if quiet is False:
-        print(f"=> {script}")
+        logger.info(u'\u21a9')
+        print(script)
     proc = subprocess.Popen(['bash', '-c', script],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.PIPE)
@@ -60,7 +67,7 @@ def get_client(host='localhost', port=27017):
 
 def get_rs_client(*hosts, rs='rs0'):
     url = f'mongodb://{",".join(hosts)}/?replicaSet={rs}'
-    # print(url)
+    logger.info(url)
     return MongoClient(url)
 
 
@@ -88,14 +95,15 @@ def key_find(lst, key, value):
     return next((item for item in lst if item[key] == value), None)
 
 
-def wait_until(func, expect, desc=None, delay=3, tries=10):
+def wait_until(func, expect, desc=None, delay=10, tries=10):
     while tries >= 0:
         actual = func()
+        logger.debug(f"Waiting until [{actual} => {expect}] ...")
         if actual == expect:
             return
         time.sleep(delay)
         tries -= 1
-    raise Exception(f"actual[{actual}] != expected[{expected}] ({desc})")
+    raise Exception(f"actual[{actual}] != expected[{expect}] ({desc})")
 
 def create_replica_set(replicas=3):
     run('docker stop `docker ps --format="{{.Names}}" | grep mongo`', True)
@@ -156,11 +164,11 @@ def create_replica_set_on_aws(replicas=3):
         'members': [{'_id': idx, 'host': info['dns']} for idx, (node, info) in enumerate(rs_info.items())]
     }
     MongoClient(public_ip, 27017).admin.command("replSetInitiate", config)
-    print("Replica set on AWS initiated:")
+    logger.info("Replica set on AWS initiated:")
     pprint(rs_info)
     c = get_rs_client(*[info['dns'] for _, info in rs_info.items()])
     wait_until(lambda: c.primary is not None, True)
-    print(f'Primary: {c.primary}')
+    logger.info(f'Primary: {c.primary}')
     return c, rs_info
 
 
