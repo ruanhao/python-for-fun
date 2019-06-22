@@ -73,6 +73,41 @@ class UnitTest(unittest.TestCase):
         collection.create_index([('item', pymongo.ASCENDING), ('stock', pymongo.ASCENDING)])
 
 
+        with self.subTest("Sort performance (Explain)"):
+            collection = db['people']
+            collection.drop()
+            collection.insert_many(
+                [
+                    {
+                        'age': random.randint(20, 30),
+                        'salary': random.randint(5000, 30000)
+                    } for _ in range(0, 10000)
+                ]
+            )
+            ###
+            collection.create_index([('age', pymongo.ASCENDING), ('salary', pymongo.DESCENDING)])
+            explain_without_using_index = \
+                collection.find({}, sort=[('age', pymongo.ASCENDING),
+                                          ('salary', pymongo.ASCENDING)])\
+                          .explain()['executionStats']
+            self.assertEqual(explain_without_using_index['totalKeysExamined'], 0)  # 0 indicates that this is query is not using an index
+            # indicate that MongoDB had to scan 10000 documents (i.e. all documents in the collection) to find matching documents
+            self.assertEqual(explain_without_using_index['totalDocsExamined'], 10000)
+            excution_time_without_using_index = explain_without_using_index['executionTimeMillis']
+
+            explain_using_index = \
+                collection.find({}, sort=[('age', pymongo.DESCENDING),
+                                          ('salary', pymongo.ASCENDING)])\
+                          .explain()['executionStats']
+            self.assertGreater(explain_using_index['totalKeysExamined'], 0)
+            self.assertEqual(explain_using_index['executionStages']['inputStage']['stage'], 'IXSCAN')  # indicate index use
+            excution_time_using_index = explain_using_index['executionTimeMillis']
+            self.assertGreater(excution_time_without_using_index, excution_time_using_index)
+
+
+
+
+
     def test_text_index(self):
         collection = db['blog']
         collection.drop()
