@@ -13,7 +13,9 @@ es = Elasticsearch()
 
 
 def _random_index():
-    return str(uuid.uuid4())
+    i = str(uuid.uuid4())
+    # print(f'Random index generated: {i}')
+    return i
 
 
 class UnitTest(unittest.TestCase):
@@ -183,6 +185,69 @@ class UnitTest(unittest.TestCase):
             }
             r = es.search(index=index, body=query)
             self.assertEqual(0, r['hits']['total']['value'])
+
+        with self.subTest("_source and store"):
+            """
+            _source can have enabled set to true or false, to specify whether you want to store the original document or not.
+            If _source is disabled, you can store individual fields by settings the store option to true.
+            """
+            index = _random_index()
+            settings = {
+                'mappings': {
+                    '_source': {
+                        'enabled': False
+                    },
+                    'properties': {
+                        'name': {
+                            'type': 'text',
+                        },
+                    }
+                }
+            }
+            r = es.indices.create(index=index, body=settings)
+            self.assertTrue(r['acknowledged'])
+            r = es.index(index=index, body={'name': "hello", 'company': 'Google'}, refresh=True)
+            query = {
+                "query": {
+                    "multi_match": {
+                        "query": "hello",
+                    },
+                }
+            }
+            r = es.search(index=index, body=query)
+            self.assertNotIn('_source', r['hits']['hits'][0], "No _source field should be there")
+
+            # store
+            index = _random_index()
+            settings = {
+                'mappings': {
+                    '_source': {
+                        'enabled': False
+                    },
+                    'properties': {
+                        'name': {
+                            'type': 'text',
+                            'store': True
+                        },
+                        'company': {
+                            'type': 'text'
+                        }
+                    }
+                }
+            }
+            r = es.indices.create(index=index, body=settings)
+            self.assertTrue(r['acknowledged'])
+            r = es.index(index=index, body={'name': "hello", 'company': 'Google'}, refresh=True)
+            query = {
+                "query": {
+                    "multi_match": {
+                        "query": "hello",
+                    },
+                }
+            }
+            r = es.search(index=index, body=query, stored_fields=['name', 'company'])
+            self.assertIn('name', r['hits']['hits'][0]['fields'])
+            self.assertNotIn('company', r['hits']['hits'][0]['fields'])
 
 
 if __name__ == '__main__':
