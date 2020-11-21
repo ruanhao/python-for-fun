@@ -1,0 +1,21 @@
+- name: playbook block
+  hosts: ansible-node1
+  gather_facts: no
+
+  tasks:
+    - block:
+        - name: failure
+          command: /bin/fake-command
+      rescue:
+        - name: do rescue
+          debug:
+            msg: tasks in block failed
+      always:
+        - name: do always
+          debug:
+            msg: always execute no matter block failed or not
+
+
+
+
+# ansible-playbook site.yml

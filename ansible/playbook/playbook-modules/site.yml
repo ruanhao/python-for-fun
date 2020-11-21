@@ -1,0 +1,41 @@
+- name: playbook modules usage
+  hosts: web
+  gather_facts: yes
+  become: yes
+
+  tasks:
+
+    - name: create group
+      group:
+        name: cisco
+        state: present
+
+    - name: print fact
+      debug:
+        msg: "{{ansible_date_time}}"
+
+    - name: create dir if not exist
+      file:
+        path: /etc/test
+        state: directory
+
+    - name: copy file from local to remote
+      copy:
+        src: files/test.txt
+        dest: /etc/test/test.txt
+
+    - name: copy template from local to remote
+      template:
+        src: templates/test.j2
+        dest: /etc/test/test.cfg
+
+    - name: test command and return value
+      command: cat /etc/hosts
+      register: command_result
+
+    - name: show command result
+      debug:
+        msg: "{{command_result}}"
+
+
+# ansible-playbook site.yml

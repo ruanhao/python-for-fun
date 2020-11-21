@@ -1,0 +1,7 @@
+- name: install python
+  become: yes
+  apt:
+    name:
+      - python3
+    state: present
+    force_apt_get: yes

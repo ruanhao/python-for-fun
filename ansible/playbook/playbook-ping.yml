@@ -1,0 +1,9 @@
+- hosts: web
+  name: playbook-ping
+  gather_facts: no
+  tasks:
+    - name: check connection
+      ping:
+
+
+# ansible-playbook playbook-ping.yml -i inventory.ini

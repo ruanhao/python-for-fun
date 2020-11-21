@@ -211,6 +211,19 @@ class UnitTest(unittest.TestCase):
         r = es.search(index=index, body=query)
         self.assertEqual(3, r['hits']['total']['value'])
 
+    def test_explain(self):
+        query = {
+            'query': {
+                'match': {
+                    'name': {
+                        'query': "Elasticsearch",
+                    }
+                }
+            }
+        }
+        r = es.search(query, INDEX, explain=True)
+        self.assertIn('_explanation', r['hits']['hits'][0])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

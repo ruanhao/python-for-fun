@@ -237,7 +237,7 @@ class UnitTest(unittest.TestCase):
             }
             r = es.indices.create(index=index, body=settings)
             self.assertTrue(r['acknowledged'])
-            r = es.index(index=index, body={'name': "hello", 'company': 'Google'}, refresh=True)
+            es.index(index=index, body={'name': "hello", 'company': 'Google'}, refresh=True)
             query = {
                 "query": {
                     "multi_match": {
@@ -248,6 +248,65 @@ class UnitTest(unittest.TestCase):
             r = es.search(index=index, body=query, stored_fields=['name', 'company'])
             self.assertIn('name', r['hits']['hits'][0]['fields'])
             self.assertNotIn('company', r['hits']['hits'][0]['fields'])
+
+        with self.subTest("dynamic"):
+            # dynamic == false
+            index = _random_index()
+            settings = {
+                "mappings": {
+                    "dynamic": False,
+                    "properties": {
+                        "name": {
+                            "type": "text"
+                        },
+                    }
+                }
+            }
+            r = es.indices.create(index=index, body=settings)
+            self.assertTrue(r['acknowledged'])
+            r = es.index(index=index, body={'name': "hello", 'company': 'Google'}, refresh=True)
+            self.assertEqual('created', r['result'])
+            query = {
+                'query': {
+                    'match': {
+                        'company': 'google'
+                    }
+                }
+            }
+            r = es.search(index=index, body=query)
+            self.assertEqual(0, r['hits']['total']['value'], 'Fields will not be indexed so will not be searchable')
+            query = {
+                'query': {
+                    'match': {
+                        'name': 'hello'
+                    }
+                }
+            }
+            r = es.search(index=index, body=query)
+            self.assertIn('company', r['hits']['hits'][0]['_source'], 'Still appear in the _source field of returned hits')
+
+            # dynamic = strict
+            index = _random_index()
+            settings = {
+                "mappings": {
+                    "dynamic": 'strict',
+                    "properties": {
+                        "name": {
+                            "type": "text"
+                        },
+                    }
+                }
+            }
+            r = es.indices.create(index=index, body=settings)
+            self.assertTrue(r['acknowledged'])
+            with self.assertRaises(RequestError):
+                """
+                An exception is thrown and the document is rejected
+                """
+                es.index(index=index, body={'name': "hello", 'company': 'Google'}, refresh=True)
+
+
+
 
 
 if __name__ == '__main__':

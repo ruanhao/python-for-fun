@@ -1,0 +1,22 @@
+- name: playbook roles
+  hosts: ansible-node1
+  gather_facts: no
+
+  tasks:
+    - include_role:
+        name: install-python
+
+    - name: uninstall git
+      become: yes
+      apt:
+        name:
+          - git
+        state: absent
+        force_apt_get: yes
+
+    - include_role:
+        name: install-git
+
+
+
+# ansible-playbook site.yml

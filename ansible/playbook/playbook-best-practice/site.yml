@@ -1,0 +1,11 @@
+- name: playbook group vars
+  hosts: web
+  gather_facts: no
+
+  tasks:
+    - name: test group vars
+      debug:
+        msg: "ansible_user={{ ansible_user }}, ansible_port: {{ ansible_port }}"
+
+
+# ansible-playbook site.yml

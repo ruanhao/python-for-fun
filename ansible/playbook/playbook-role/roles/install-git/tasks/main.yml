@@ -1,0 +1,8 @@
+- name: install git
+  become: yes
+  apt:
+    name:
+      - git
+    state: present
+    force_apt_get: yes
+  notify: git installed

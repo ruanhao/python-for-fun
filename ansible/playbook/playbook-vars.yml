@@ -1,0 +1,16 @@
+- name: playbook-vars
+  hosts: web
+  gather_facts: no
+
+  vars_files:
+    - "vars.yml"                # high priority
+  vars:
+    greetings: "hello from playbook"
+
+  tasks:
+    - name: show greetings
+      debug:
+        msg: "{{ greetings }}"
+
+
+# ansible-playbook playbook-vars.yml -i inventory.ini

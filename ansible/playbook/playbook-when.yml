@@ -1,0 +1,22 @@
+- name: playbook-when
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    seq:
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+      - 6
+
+  tasks:
+    - name: test when
+      debug:
+        msg: "{{ item }}"
+      with_items: "{{ seq }}"
+      when: item >= 3
+
+
+# ansible-playbook playbook-when.yml -i inventory.ini

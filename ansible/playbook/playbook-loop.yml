@@ -1,0 +1,28 @@
+- name: playbook-loop
+  hosts: web
+  gather_facts: no
+
+  vars:
+    test:
+      - test1
+      - test2
+      - test3
+    demo:
+      - demo1
+      - demo2
+      - demo3
+
+  tasks:
+    - name: test loop
+      debug:
+        msg: "{{ item }}"
+      with_items: "{{ test }}"
+    - name: test nested loop
+      debug:
+        msg: "{{ item }}"
+      with_nested:
+        - "{{ test }}"
+        - "{{ demo }}"
+
+
+# ansible-playbook playbook-loop.yml -i inventory.ini

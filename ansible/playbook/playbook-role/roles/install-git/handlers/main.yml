@@ -1,0 +1,3 @@
+- name: git installed
+  debug:
+    msg: "Handler: git installed"

@@ -110,3 +110,7 @@ tls.key
 https.cert
 https.key
 foo
+
+.vagrant
+
+.log
