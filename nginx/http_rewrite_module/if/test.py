@@ -34,6 +34,19 @@ class UnitTest(unittest.TestCase):
         self.assertEqual(200, r.status_code)
 
 
+    def test_evil_if(self):
+        r = s.get(api("/evil/if"))
+        self.assertFalse('X-FIRST-HEADER' in r.headers)
+        self.assertFalse('X-ORIGIN-HEADER' in r.headers)
+        self.assertTrue('X-SECOND-HEADER' in r.headers)
+        self.assertEqual("str: aaa", r.text)
+
+
+    def test_evil_if_break(self):
+        r = s.get(api("/evil/if/break"))
+        self.assertTrue('X-FIRST-HEADER' in r.headers)
+        self.assertFalse('X-SECOND-HEADER' in r.headers)
+
 
 
 if __name__ == '__main__':
