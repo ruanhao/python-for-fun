@@ -114,3 +114,4 @@ foo
 .vagrant
 
 .log
+*.vdi
