@@ -115,3 +115,5 @@ foo
 
 .log
 *.vdi
+
+join-command
