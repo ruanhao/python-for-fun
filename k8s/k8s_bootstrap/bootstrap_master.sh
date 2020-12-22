@@ -3,6 +3,10 @@
 # Initialize Kubernetes
 echo "[TASK 1] Initialize Kubernetes Cluster"
 kubeadm init --apiserver-advertise-address=172.42.42.100 --pod-network-cidr=192.168.0.0/16 | tee /root/kubeinit.log
+# 启用 Swagger UI :
+# 1. Add --enable-swagger-ui=true to API manifest file /etc/kubernetes/manifests/kube-apiserver.yaml
+# 2. Save the file (API pod will restart itself)
+# 3. See https://jonnylangefeld.com/blog/kubernetes-how-to-view-swagger-ui
 
 # Copy Kube admin config
 echo "[TASK 2] Copy kube admin config to Vagrant user .kube directory"

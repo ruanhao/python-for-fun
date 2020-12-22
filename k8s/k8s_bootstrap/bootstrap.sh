@@ -78,3 +78,14 @@ echo -e "kubeadmin\nkubeadmin" | passwd root
 
 # Update vagrant user's bashrc file
 echo "export TERM=xterm" >> /etc/bashrc
+
+echo "[TASK 10] Preconfigure for glusterfs"
+# glusterfs 需要的内核模块支持
+modprobe dm_thin_pool
+add-apt-repository ppa:gluster/glusterfs-8 -y
+apt-get -y install glusterfs-client
+# https://github.com/gluster/gluster-kubernetes/issues/510
+rm -rf /var/lib/heketi
+rm -rf /etc/glusterfs
+rm -rf /var/lib/glusterd
+rm -rf /var/lib/misc/glusterfsd

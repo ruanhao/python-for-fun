@@ -117,3 +117,4 @@ foo
 *.vdi
 
 join-command
+tmp/
