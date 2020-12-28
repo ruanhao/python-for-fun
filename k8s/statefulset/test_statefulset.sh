@@ -55,7 +55,7 @@ items:
       path: /tmp/pv-c-$timestamp
 
 EOF
-kubectl create -f $_SCRIPT_DIR/kubia-statefulset.yaml
+kubectl create -f $_SCRIPT_DIR/kubia-statefulset-sc-empty.yaml
 wait_for_pod_ready_by_name kubia-0
 wait_for_pod_ready_by_name kubia-1
 info "Show all pvc"

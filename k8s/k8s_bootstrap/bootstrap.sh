@@ -1,6 +1,17 @@
 #!/bin/bash
 
-KUBERNETES_VERSION=1.18.12-00
+KUBERNETES_VERSION=1.18.14-00
+
+mkdir -p /.docker
+cat <<EOF | tee /.docker/config.json
+{
+        "auths": {
+                "https://index.docker.io/v1/": {
+                        "auth": "cnVhbmhhbzowNjdmMDRkZi1lYWNmLTQwYTItODg3Zi0zOGNmNWQzZDYzZDQ="
+                }
+        }
+}
+EOF
 
 cat <<EOF | sudo -u vagrant tee /home/vagrant/.inputrc
 "\C-p": history-search-backward
