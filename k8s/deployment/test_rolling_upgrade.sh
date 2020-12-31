@@ -13,7 +13,7 @@ new_ns
 
 # 创建 deployment
 kubectl create -f $_SCRIPT_DIR/kubia-deployment-v1.yaml --record
-kubectl rollout status deployment kubia --timeout=5m # wait for: deployment "kubia" successfully rolled out
+kubectl rollout status deployment kubia || true # wait for: deployment "kubia" successfully rolled out
 num_of_kubia_rs=$( kubectl get rs | grep kubia | wc -l )
 [[ "$num_of_kubia_rs" == 1 ]] || fail "There must be only one replicaset for kubia"
 
@@ -28,7 +28,7 @@ kubectl patch deployment kubia -p '{"spec": {"minReadySeconds": 10}}' # 减慢�
 # 触发升级
 info "Updating image ..."
 kubectl set image deployment kubia nodejs=luksa/kubia:v2
-kubectl rollout status deployment kubia --timeout=5m
+kubectl rollout status deployment kubia || true
 num_of_kubia_rs=$( kubectl get rs | grep kubia | wc -l )
 [[ "$num_of_kubia_rs" == 2 ]] || fail "There must be 2 replicaset for kubia"
 curl -s 172.42.42.100:$nodeport | grep v2
@@ -38,5 +38,5 @@ kubectl rollout history deployment kubia
 
 # 回退
 kubectl rollout undo deployment kubia --to-revision=1
-kubectl rollout status deployment kubia --timeout=5m
+kubectl rollout status deployment kubia || true
 curl -s 172.42.42.100:$nodeport | grep v1
