@@ -1,7 +1,7 @@
 #!/bin/bash
 
 export DEBIAN_FRONTEND=noninteractive
-TOTAL_TASK_STEPS=6
+TOTAL_TASK_STEPS=7
 
 # Initialize Kubernetes
 cowsay "[TASK 1/$TOTAL_TASK_STEPS (master)] Initialize Kubernetes Cluster"
@@ -31,7 +31,15 @@ patch /vagrant/k8s_bootstrap/metrics-server-components-v0.4.1.yaml \
 cowsay "[TASK 5/$TOTAL_TASK_STEPS (master)] Generate and save cluster join command to /joincluster.sh"
 kubeadm token create --print-join-command | tee /joincluster.sh
 
-cowsay "[TASK 6/$TOTAL_TASK_STEPS (master)] Customize bashrc"
+cowsay "[TASK 6/$TOTAL_TASK_STEPS (master)] Intalling helm"
+curl https://baltocdn.com/helm/signing.asc | apt-key add -
+echo "deb https://baltocdn.com/helm/stable/debian/ all main" | tee /etc/apt/sources.list.d/helm-stable-debian.list
+apt-get update
+apt-get install helm=3.4.2-1 -y
+helm completion bash > /etc/bash_completion.d/helm
+
+
+cowsay "[TASK 7/$TOTAL_TASK_STEPS (master)] Customize bashrc"
 apt-get install bash-completion -y
 kubectl completion bash > /etc/bash_completion.d/kubectl
 curl -o /etc/kube-ps1.sh https://raw.githubusercontent.com/jonmosco/kube-ps1/master/kube-ps1.sh

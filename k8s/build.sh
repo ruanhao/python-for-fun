@@ -7,6 +7,7 @@ set -e
 set -x
 
 vagrant destroy -f || true
+rm -rf tmp
 
 vagrant up
 
