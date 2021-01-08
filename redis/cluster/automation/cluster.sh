@@ -27,7 +27,7 @@ python3 -m unittest verifications.UnitTest.test_AFTER_ONE_MASTER_ADDED
 info "Adding new slave node ..."
 master4_id=$( vagrant ssh master4 -- redis-cli cluster myid )
 vagrant ssh master1 -- redis-cli --cluster add-node 192.168.33.24:6379 192.168.33.11:6379 --cluster-slave --cluster-master-id $master4_id
-wait_a_while 5
+wait_a_while 10
 python3 -m unittest verifications.UnitTest.test_AFTER_ONE_SLAVE_ADDED
 vagrant ssh master1 -- redis-cli --cluster check 192.168.33.11:6379 --cluster-search-multiple-owners # 检查集群
 
