@@ -86,10 +86,10 @@ function test_redirect() {
 }
 
 
-# test_protocol
-# test_log
-# test_snat
-# test_dnat
+test_protocol
+test_log
+test_snat
+test_dnat
 test_redirect
 
 
