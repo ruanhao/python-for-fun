@@ -6,40 +6,45 @@
 # configures the configuration version (we support older styles for
 # backwards compatibility). Please don't change it unless you know what
 # you're doing.
+NUM_OF_DISKS = 11               # 2(raid0) + 2(raid1) + 3(raid5) + 4(raid6)
+PER_DISK_SIZE = 256 # MB
+SATA_CONTROLLER_CHECK_FILE = "hds/sata_controller_check.vdi"
 Vagrant.configure("2") do |config|
 
   config.vm.define "main" do |main|
-
     main.vm.box = "centos/7"
     main.vm.box_check_update = false
-
     main.vm.network :private_network, ip: "192.168.33.10"
-    # main.vm.network "forwarded_port", guest: 80, host: 48080
-
-    main.vm.synced_folder "./data", "/vagrant"
-
     main.vm.provider "virtualbox" do |vb|
-      unless File.exist?('./anotherDisk.vdi')
-        vb.customize ['createhd', '--filename', './anotherDisk.vdi', '--variant', 'Fixed', '--size', 10 * 1024]
-      end
       vb.memory = "1024"
-      vb.customize ['storageattach', :id,  '--storagectl', 'IDE', '--port', 1, '--device', 0, '--type', 'hdd', '--medium', './anotherDisk.vdi']
+      unless File.exist?(SATA_CONTROLLER_CHECK_FILE)
+        vb.customize ['storagectl', :id, '--name', "SATA Controller", '--add', 'sata', '--portcount', NUM_OF_DISKS]
+        vb.customize ['createhd', '--filename', SATA_CONTROLLER_CHECK_FILE, '--variant', 'Fixed', '--size', PER_DISK_SIZE]
+      end
+      (1..NUM_OF_DISKS-1).each do |i|
+        diskFilename = "hds/disk_#{i}.vdi"
+        unless File.exist?(diskFilename)
+          vb.customize ['createhd', '--filename', diskFilename, '--variant', 'Fixed', '--size', PER_DISK_SIZE]
+        end
+        vb.customize ['storageattach', :id,  '--storagectl', "SATA Controller", '--port', i, '--device', 0, '--type', 'hdd', '--medium', diskFilename]
+      end
+      vb.customize ['storageattach', :id,  '--storagectl', "SATA Controller", '--port', NUM_OF_DISKS, '--device', 0, '--type', 'hdd', '--medium', SATA_CONTROLLER_CHECK_FILE]
     end
 
-    main.vm.provision "shell", path: "mk_partitions.sh"
+    # main.vm.provision "shell", path: "mk_partitions.sh"
     main.vm.provision "shell", inline: <<-SHELL
-    sudo yum install mdadm -y
-    # yes | sudo mdadm -C /dev/md0 -a yes -l0 -n2 /dev/sdb1 /dev/sdb2 # raid 0
-    yes | sudo mdadm -C /dev/md0 -a yes -l1 -n2 /dev/sdb1 /dev/sdb2 # raid 1
-    sudo mdadm -D /dev/md0 # 查看信息
-    # dd if=/dev/zero of=/dev/sdb1 bs=1024M count=3 # 对磁盘进行破坏
-    echo DEVICE /dev/sdb[1,2,3] | sudo tee -a /etc/mdadm.conf # 写入配置文件（下次开机生效）
-    sudo mdadm -Evs | sudo tee -a /etc/mdadm.conf # 写入配置文件（下次开机生效）
-    sudo mkdir /mnt/md0
-    sudo mkfs.ext4 /dev/md0
-    sudo mount /dev/md0 /mnt/md0
-    lsblk
-    df -h
+    yum install mdadm -y
+    # # yes | sudo mdadm -C /dev/md0 -a yes -l0 -n2 /dev/sdb1 /dev/sdb2 # raid 0
+    # yes | sudo mdadm -C /dev/md0 -a yes -l1 -n2 /dev/sdb1 /dev/sdb2 # raid 1
+    # sudo mdadm -D /dev/md0 # 查看信息
+    # # dd if=/dev/zero of=/dev/sdb1 bs=1024M count=3 # 对磁盘进行破坏
+    # echo DEVICE /dev/sdb[1,2,3] | sudo tee -a /etc/mdadm.conf # 写入配置文件（下次开机生效）
+    # sudo mdadm -Evs | sudo tee -a /etc/mdadm.conf # 写入配置文件（下次开机生效）
+    # sudo mkdir /mnt/md0
+    # sudo mkfs.ext4 /dev/md0
+    # sudo mount /dev/md0 /mnt/md0
+    # lsblk
+    # df -h
 
 
     SHELL
