@@ -118,3 +118,4 @@ foo
 
 join-command
 tmp/
+*.pcap
