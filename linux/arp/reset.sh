@@ -22,4 +22,9 @@ iptables -F
 
 
 ip rule del table 100 2>/dev/null || true
+ip rule del pref 1000 2>/dev/null || true
 ip rule del pref 100 2>/dev/null || true
+ip rule add prio 0 table local 2>/dev/null || true
+
+
+ip l set lo up

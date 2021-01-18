@@ -1,6 +1,6 @@
 #!/bin/bash
 
-yum install -y tcpdump socat nc bridge-utils
+yum install -y tcpdump socat nc
 
 cat <<EOF | sudo -u vagrant tee /home/vagrant/.inputrc | cat - > /root/.inputrc
 "\C-p": history-search-backward

@@ -24,6 +24,7 @@ bash /vagrant/reset.sh
 ip link add veth0 type veth peer name veth1
 ip link set veth0 up
 ip link set veth1 up
+ip link set lo down
 ip a a 192.168.1.2/24 dev veth0
 ip a a 192.168.1.3/24 dev veth1
 

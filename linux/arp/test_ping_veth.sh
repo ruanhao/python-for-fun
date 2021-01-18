@@ -27,6 +27,7 @@ ip link set veth0 up
 ip link set veth1 up
 ip a a 192.168.1.2/24 dev veth0
 ip a a 192.168.1.3/24 dev veth1
+ip l set lo down
 
 echo 1 > /proc/sys/net/ipv4/conf/veth1/accept_local
 echo 1 > /proc/sys/net/ipv4/conf/veth0/accept_local
@@ -39,8 +40,11 @@ iptables -t mangle -I POSTROUTING ! -d 10.0.2.0/24 -j LOG --log-prefix "mangle@P
 iptables -I INPUT ! -d 10.0.2.0/24 -j LOG --log-prefix "filter@INPUT: " --log-level 4
 iptables -I OUTPUT ! -d 10.0.2.0/24 -j LOG --log-prefix "filter@OUTPUT: " --log-level 4
 
+ip rule add prio 1000 table local
+ip rule del prio 0
 ip rule add fwmark 100 pref 10 tab 100
 ip route add 192.168.1.2/32 dev veth1 tab 100
+ip route add 192.168.1.3/32 dev veth0 tab 100
 iptables -t mangle -A OUTPUT -d 192.168.1.0/24 -j MARK --set-mark 100
 
 ping -I veth0 192.168.1.3 -c 1 -W 1 || fail "Everything should be fine"

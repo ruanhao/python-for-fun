@@ -5,7 +5,7 @@
 
 cat <<EOF > /etc/sysconfig/network-scripts/ifcfg-lo:0
 DEVICE=lo:0
-IPADDR=10.74.68.58
+IPADDR=10.80.68.58
 PREFIX=32
 ONPARENT=yes
 EOF
