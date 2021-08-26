@@ -1,0 +1,44 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+
+  config.vm.box = "bento/centos-7"
+  config.ssh.forward_agent = true # So that boxes don't have to setup key-less ssh
+  config.ssh.insert_key = false # To generate a new ssh key and don't use the default Vagrant one
+
+  vars = {
+     "TEST" => "IPTABLES"
+  }
+
+  # escape environment variables to be loaded to /etc/profile.d/
+  as_str = vars.map{|k,str| ["export #{k}=#{str.gsub '$', '\$'}"] }.join("\n")
+
+  # common provisioning for all
+  config.vm.provision "shell", inline: "echo \"#{as_str}\" > /etc/profile.d/iptables_env.sh", run: "always"
+  config.vm.provision "shell", path: "scripts/init.sh", env: vars
+
+  config.vm.define "internal" do |s|
+    s.vm.hostname = "internal"
+    s.vm.network "private_network", ip: "172.0.1.2"
+    s.vm.provision "shell", path: "scripts/internal.sh", env: vars
+  end
+
+  config.vm.define "gateway" do |s|
+    s.vm.hostname = "gateway"
+    s.vm.network "private_network", ip: "172.0.1.254"
+    s.vm.network "private_network", ip: "10.0.1.3"
+    s.vm.provision "shell", path: "scripts/gateway.sh", env: vars
+  end
+
+  config.vm.define "outside" do |s|
+    s.vm.hostname = "outside"
+    s.vm.network "private_network", ip: "10.0.1.2"
+    s.vm.provision "shell", path: "scripts/outside.sh", env: vars
+  end
+
+  config.vm.provider "virtualbox" do |v|
+    #  This setting controls how much cpu time a virtual CPU can use. A value of 50 implies a single virtual CPU can use up to 50% of a single host CPU.
+    v.customize ["modifyvm", :id, "--cpuexecutioncap", "50"]
+  end
+end

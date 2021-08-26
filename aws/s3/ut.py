@@ -65,12 +65,22 @@ class UnitTest(unittest.TestCase):
 
         bucket = str(uuid.uuid4())
         current_region = run('aws configure get region', True)
-        s3_client.create_bucket(
-            Bucket=bucket,
-            CreateBucketConfiguration={
-                'LocationConstraint': current_region
-            },
-        )
+        # https://github.com/boto/boto3/issues/125
+        if current_region == 'us-east-1':
+            s3_client.create_bucket(
+                Bucket=bucket,
+            )
+        else:
+            s3_client.create_bucket(
+                Bucket=bucket,
+                CreateBucketConfiguration={'LocationConstraint': current_region},
+            )
+        # s3_client.create_bucket(
+        #     Bucket=bucket,
+        #     CreateBucketConfiguration={
+        #         'LocationConstraint': current_region
+        #     },
+        # )
         run(f'aws s3 cp helloworld.html s3://{bucket}/')
         policy = {
             'Version': "2012-10-17",
