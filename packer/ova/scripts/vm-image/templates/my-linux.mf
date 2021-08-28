@@ -1,0 +1,2 @@
+SHA1(my-linux-disk1.vmdk)= @@DISK_HASH@@
+SHA1(my-linux.ovf)= @@OVF_HASH@@

@@ -1,0 +1,7 @@
+staging/
+.DS_Store
+packer_cache
+http/ubuntu/preseed.cfg
+my-linux*output/
+**/.idea/
+*.iml
