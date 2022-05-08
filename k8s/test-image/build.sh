@@ -5,4 +5,4 @@
 
 
 env GOOS=linux GARCH=amd64 CGO_ENABLED=0 go build main.go
-docker build -t ruanhao/kubia .
+docker build -t ruanhao/kubia:v2 .

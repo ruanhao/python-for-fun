@@ -1,6 +1,7 @@
 package main
 
 import (
+    "net"
     "net/http"
     "os"
     "fmt"
@@ -8,13 +9,33 @@ import (
     "syscall"
 )
 
-func hostName(w http.ResponseWriter, req *http.Request) {
-    name, err := os.Hostname()
+func info(w http.ResponseWriter, req *http.Request) {
+    hostname, err := os.Hostname()
     if err != nil {
         panic(err)
     }
-    nameByte := []byte("Demo(v1) [POD: " + name + "]\n")
+    uri := req.URL.Path
+    ip := GetLocalIP()
+    output := fmt.Sprintf("demo(v2), uri: %s, pod: %s, ip: %s\n", uri, hostname, ip)
+    nameByte := []byte(output)
     w.Write(nameByte)
+}
+
+// GetLocalIP returns the non loopback local IP of the host
+func GetLocalIP() string {
+    addrs, err := net.InterfaceAddrs()
+    if err != nil {
+        return ""
+    }
+    for _, address := range addrs {
+        // check the address type and if it is not a loopback the display it
+        if ipnet, ok := address.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+            if ipnet.IP.To4() != nil {
+                return ipnet.IP.String()
+            }
+        }
+    }
+    return ""
 }
 
 func ExitFunc()  {
@@ -34,6 +55,6 @@ func main() {
             }
         }
     }()
-    http.HandleFunc("/", hostName)
+    http.HandleFunc("/", info)
     http.ListenAndServe(":80", nil)
 }
