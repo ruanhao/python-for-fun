@@ -745,6 +745,7 @@ if [[ ${EXISTS_DEPLOY_HEKETI} -eq 1 ]] && [[ ${EXISTS_HEKETI} -eq 0 ]]; then
   fi
 
   if [[ $("${heketi_cli}" volume list 2>&1) != *heketidbstorage* ]]; then
+    # eval_output "${heketi_cli} setup-openshift-heketi-storage --listfile=/tmp/heketi-storage.json --durability=none 2>&1"
     eval_output "${heketi_cli} setup-openshift-heketi-storage --listfile=/tmp/heketi-storage.json 2>&1"
     if [[ ${?} != 0 ]]; then
       output "Failed on setup openshift heketi storage"

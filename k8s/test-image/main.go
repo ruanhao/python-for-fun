@@ -16,7 +16,7 @@ func info(w http.ResponseWriter, req *http.Request) {
     }
     uri := req.URL.Path
     ip := GetLocalIP()
-    output := fmt.Sprintf("demo(v2), uri: %s, pod: %s, ip: %s\n", uri, hostname, ip)
+    output := fmt.Sprintf("demo(v1), uri: %s, pod: %s, ip: %s\n", uri, hostname, ip)
     nameByte := []byte(output)
     w.Write(nameByte)
 }
